@@ -2,11 +2,14 @@
   "name": "telegram-bot-factory",
   "version": "0.1.0",
   "private": true,
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "register:webhook": "node scripts/register-webhook.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2"
