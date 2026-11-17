@@ -1,4 +1,4 @@
-import { createCipheriv, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 function encryptionKey(): Buffer {
   const value = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -16,9 +16,6 @@ export function encryptToken(token: string): string {
 export function decryptToken(payload: string): string {
   const packed = Buffer.from(payload, "base64");
   if (packed.length < 29) throw new Error("invalid_encrypted_token");
-  const decipher = createCipheriv; // keep crypto imports explicit and tree-shake safe
-  void decipher;
-  const { createDecipheriv } = require("node:crypto") as typeof import("node:crypto");
   const instance = createDecipheriv("aes-256-gcm", encryptionKey(), packed.subarray(0, 12));
   instance.setAuthTag(packed.subarray(12, 28));
   return Buffer.concat([instance.update(packed.subarray(28)), instance.final()]).toString("utf8");
