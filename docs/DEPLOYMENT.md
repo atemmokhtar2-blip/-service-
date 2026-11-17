@@ -16,7 +16,7 @@ Set these variables in the `bot-factory` Vercel project:
 | `TELEGRAM_WEBHOOK_SECRET` | Telegram webhook secret, 1–256 chars from A-Z, a-z, 0-9, underscore, hyphen |
 | `FACTORY_SERVICE_SECRET` | Shared HMAC secret (at least 32 random bytes) for source adapters |
 | `PUBLIC_BASE_URL` | The stable production URL of this Vercel project |
-| `DOWNLOAD_PROVISION_URL` | Railway API service URL + `/internal/factory/provision` |
+| `DOWNLOAD_PROVISION_URL` | Existing Download Railway service URL + `/internal/factory/provision` (same service, no extra service) |
 | `PRECRIME_PROVISION_URL` | Pre-Crime Vercel URL + `/api/factory/provision` |
 | `MARAYTI_PROVISION_URL` | Marayti Vercel URL + `/api/factory/provision` |
 | `REQUIRED_CHANNEL_ID` | `@K_J6k` |
@@ -48,22 +48,23 @@ Use distinct token-encryption keys for each project. Do not reuse
 
 ### Download — Railway
 
-Add a second Railway service from the Download repository after merging its
-adapter branch. Start command:
+Keep the existing Download Railway service and its current public domain. Do
+not create a second Railway service. The factory API is mounted inside the
+existing Gradio/ASGI process started by `python3 app.py`; the existing bot
+process owns all clone pollers and discovers provisioned instances from the
+same PostgreSQL database.
 
-```bash
-uvicorn services.factory_api:app --host 0.0.0.0 --port $PORT
-```
+Set on the existing Download service:
+- `FACTORY_SERVICE_SECRET` — the same HMAC secret used by Factory and the other source adapters.
+- `FACTORY_MANAGER_BOT_TOKEN` — the Factory bot token; the Factory bot must be an administrator in `@K_J6k`.
+- Keep the existing PostgreSQL DSN and stable `BOT_SECRETS_KEY`.
+- Keep `ENABLE_CLONE_INSTANCES=1`.
 
-Keep the existing service's `python3 app.py` command unchanged. The API
-service and long-running bot service must share the same PostgreSQL database
-and exactly the same `BOT_SECRETS_KEY`. Set `FACTORY_SERVICE_SECRET` on the
-API service. The main worker must run the updated code so its 20-second sync
-worker discovers newly provisioned instances.
-
-Each Download clone must already be an administrator of `@K_J6k`; the
-provisioning endpoint checks this and refuses to activate a clone that cannot
-verify channel membership.
+Set `DOWNLOAD_PROVISION_URL` in Factory to the existing Download public URL
+plus `/internal/factory/provision`. The same host serves `/health` and the
+factory provisioning/status endpoints. Customer-created Download clone bots
+do not need channel admin rights; membership checks use the central manager
+bot token.
 
 ### Pre-Crime — Vercel
 
