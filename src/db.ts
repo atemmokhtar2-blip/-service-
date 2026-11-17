@@ -27,6 +27,7 @@ export async function ensureSchema(): Promise<void> {
       UNIQUE(owner_telegram_id, template_key)
     )
   `;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_instances_owner_template_unique ON factory_instances(owner_telegram_id, template_key)`;
   await sql`CREATE INDEX IF NOT EXISTS factory_instances_owner_idx ON factory_instances(owner_telegram_id, created_at DESC)`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_pending_actions (
