@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { ensureSchema, recordUpdate } from "../src/db.js";
+import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate } from "../src/db.js";
 import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
 import { retryProvision, showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
@@ -12,13 +12,18 @@ type TelegramUpdate = {
 };
 
 export default async function handler(req: IncomingMessage & { body?: TelegramUpdate }, res: ServerResponse) {
+  let claimedUpdateId: number | null = null;
   if (req.method !== "POST") { res.statusCode = 405; res.end("Method Not Allowed"); return; }
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
   if (!secret || req.headers["x-telegram-bot-api-secret-token"] !== secret) { res.statusCode = 401; res.end("Unauthorized"); return; }
   try {
     await ensureSchema();
     const update = req.body ?? await readBody(req);
-    if (!Number.isSafeInteger(update.update_id) || !(await recordUpdate(update.update_id!))) {
+    if (!Number.isSafeInteger(update.update_id)) {
+      res.statusCode = 400; res.end("Invalid update"); return;
+    }
+    claimedUpdateId = update.update_id!;
+    if (!(await recordUpdate(claimedUpdateId))) {
       res.statusCode = 200; res.end("OK"); return;
     }
     const token = process.env.FACTORY_BOT_TOKEN;
@@ -58,11 +63,15 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
         else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6));
       }
     }
+    await markUpdateDone(claimedUpdateId);
     res.statusCode = 200; res.end("OK");
   } catch (error) {
     // Do not log request bodies, bot tokens, Telegram API URLs, or raw exception messages.
+    if (claimedUpdateId !== null) {
+      try { await markUpdateFailed(claimedUpdateId); } catch { /* Telegram retry remains the recovery path. */ }
+    }
     console.error("factory_webhook_failed", { errorType: error instanceof Error ? error.name : "unknown" });
-    res.statusCode = 200; res.end("OK");
+    res.statusCode = 500; res.end("Temporary failure");
   }
 }
 
