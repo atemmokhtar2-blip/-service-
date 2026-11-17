@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "./db.js";
-import { decryptToken, encryptToken } from "./security.js";
+import { decryptToken, encryptToken, signServiceRequest } from "./security.js";
 import { getBotIdentity, getChannelMembership, sendMessage, type TelegramUser } from "./telegram.js";
 
 export const TEMPLATES = {
@@ -107,6 +107,7 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
       `تم التحقق من التوكن بنجاح للبوت @${escapeHtml(identity.username ?? "بدون اسم")}.\n\nحُجز طلب التصنيع بأمان. جارٍ تجهيز الربط مع محرك القالب؛ لن نعلن نجاح التشغيل قبل تأكيد الخدمة الأصلية.`,
       [[{ text: "حالة النسخة", callback_data: `instance:${template}` }, { text: "القوالب", callback_data: "templates" }]]);
     await provisionTemplate(template, { requestId, ownerId: user.id, token });
+    await showInstance(user, chatId, template);
   } catch (error) {
     const code = safeCode(error);
     await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE request_id=${requestId}`;
@@ -154,10 +155,41 @@ export async function showTemplates(user: TelegramUser, chatId: number): Promise
   await sendMessage(factoryToken(), chatId, "قوالب المصنع المتاحة:", templateKeyboard(user.id));
 }
 
+async function refreshDownloadStatus(requestId: string): Promise<void> {
+  const base = process.env.DOWNLOAD_PROVISION_URL;
+  if (!base) return;
+  try {
+    const endpoint = new URL(`/internal/factory/status/${requestId}`, base);
+    const signed = signServiceRequest("GET", endpoint.pathname, "");
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: { "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return;
+    const result = await response.json() as { status?: string; bot_id?: number; bot_username?: string; instance_id?: string; error_code?: string };
+    if (!["active", "provisioning", "failed"].includes(String(result.status))) return;
+    await sql`
+      UPDATE factory_instances SET status=${result.status}, source_instance_id=${result.instance_id ?? null},
+        bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null},
+        safe_error_code=${result.error_code ?? null}, updated_at=NOW()
+      WHERE request_id=${requestId}
+    `;
+  } catch {
+    // Status refresh is best-effort; the durable source record remains authoritative.
+  }
+}
+
 export async function showInstance(user: TelegramUser, chatId: number, template: string): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
-  const rows = await sql`SELECT status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
+  if (!(template in TEMPLATES)) return;
+  const key = template as TemplateKey;
+  let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
   if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة مسجلة من هذا القالب.");
+  if (key === "download" && ["provisioning", "active"].includes(String(rows[0].status))) {
+    await refreshDownloadStatus(String(rows[0].request_id));
+    rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
+  }
   const row = rows[0];
   const keyboard = [
     ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
