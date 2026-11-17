@@ -42,6 +42,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
           console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
           await sendMessage(token, chatId,
             "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
+          await markUpdateDone(claimedUpdateId);
           res.statusCode = 200; res.end("OK"); return;
         }
         await submitToken(user, chatId, update.message.text);
