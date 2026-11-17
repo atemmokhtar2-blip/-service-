@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, recordUpdate } from "../src/db.js";
-import { answerCallback, deleteMessage } from "../src/telegram.js";
+import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
 import { retryProvision, showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
@@ -31,8 +31,13 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       else if (update.message.text === "/templates") await showTemplates(user, chatId);
       else if (update.message.text && !update.message.text.startsWith("/")) {
         // Remove the submitted credential from chat history immediately after processing.
-        try { await deleteMessage(token, chatId, update.message.message_id); } catch {
+        try {
+          await deleteMessage(token, chatId, update.message.message_id);
+        } catch {
           console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
+          await sendMessage(token, chatId,
+            "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
+          res.statusCode = 200; res.end("OK"); return;
         }
         await submitToken(user, chatId, update.message.text);
       }
