@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "./db.js";
-import { encryptToken } from "./security.js";
+import { decryptToken, encryptToken } from "./security.js";
 import { getBotIdentity, getChannelMembership, sendMessage, type TelegramUser } from "./telegram.js";
 
 export const TEMPLATES = {
@@ -50,7 +50,10 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
     const row = existing[0];
     await sendMessage(factoryToken(), chatId,
       `لديك بالفعل نسخة من قالب ${TEMPLATES[template].title}.\nالحالة: ${statusArabic(String(row.status))}${row.bot_username ? `\nالبوت: @${escapeHtml(String(row.bot_username))}` : ""}\nلا يمكن إنشاء نسخة ثانية من نفس القالب.`,
-      [[{ text: "العودة للقوالب", callback_data: "templates" }]]);
+      [
+        ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
+        [{ text: "العودة للقوالب", callback_data: "templates" }],
+      ]);
     return;
   }
   await sql`
@@ -138,7 +141,12 @@ async function provisionTemplate(template: TemplateKey, payload: { requestId: st
     return;
   }
   const result = await response.json() as { instance_id?: string; bot_id?: number; bot_username?: string; status?: string };
-  await sql`UPDATE factory_instances SET status='active', source_instance_id=${result.instance_id ?? null}, bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null}, updated_at=NOW() WHERE request_id=${payload.requestId}`;
+  if (!result.instance_id || !["active", "provisioning"].includes(String(result.status))) {
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+  const state = result.status === "active" ? "active" : "provisioning";
+  await sql`UPDATE factory_instances SET status=${state}, source_instance_id=${result.instance_id}, bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null}, safe_error_code=NULL, updated_at=NOW() WHERE request_id=${payload.requestId}`;
 }
 
 export async function showTemplates(user: TelegramUser, chatId: number): Promise<void> {
@@ -147,12 +155,42 @@ export async function showTemplates(user: TelegramUser, chatId: number): Promise
 }
 
 export async function showInstance(user: TelegramUser, chatId: number, template: string): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
   const rows = await sql`SELECT status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
   if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة مسجلة من هذا القالب.");
   const row = rows[0];
+  const keyboard = [
+    ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
+    [{ text: "القوالب", callback_data: "templates" }],
+  ];
   await sendMessage(factoryToken(), chatId,
     `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`,
-    [[{ text: "القوالب", callback_data: "templates" }]]);
+    keyboard);
+}
+
+export async function retryProvision(user: TelegramUser, chatId: number, template: string): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  if (!(template in TEMPLATES)) return;
+  const key = template as TemplateKey;
+  const rows = await sql`
+    SELECT request_id, encrypted_token, status
+    FROM factory_instances
+    WHERE owner_telegram_id=${user.id} AND template_key=${key}
+    LIMIT 1
+  `;
+  if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة لإعادة تصنيعها.");
+  const row = rows[0];
+  if (String(row.status) !== "failed") return showInstance(user, chatId, key);
+  try {
+    const token = decryptToken(String(row.encrypted_token));
+    const requestId = String(row.request_id);
+    await sql`UPDATE factory_instances SET status='provisioning', safe_error_code=NULL, updated_at=NOW() WHERE request_id=${requestId}`;
+    await provisionTemplate(key, { requestId, ownerId: user.id, token });
+  } catch (error) {
+    const code = safeCode(error);
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE owner_telegram_id=${user.id} AND template_key=${key}`;
+  }
+  await showInstance(user, chatId, key);
 }
 
 function statusArabic(status: string): string {
