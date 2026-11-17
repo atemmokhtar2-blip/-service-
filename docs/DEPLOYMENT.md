@@ -72,6 +72,7 @@ Set:
 - `FACTORY_SERVICE_SECRET` — shared with Factory and the other adapters.
 - `MANAGED_BOT_TOKEN_ENCRYPTION_KEY_V2` — 64 hex characters.
 - `MANAGED_BOT_WEBHOOK_MASTER_SECRET` — a separate random secret for per-bot webhook derivation.
+- `MANAGED_BOT_WEBHOOK_BASE_URL` — stable production domain, e.g. `https://pre-crime-sage.vercel.app`.
 - `FACTORY_MANAGER_BOT_TOKEN` — token of a bot that is an administrator in `@K_J6k`; falls back to `TELEGRAM_BOT_TOKEN`.
 - Existing `DATABASE_URL` and other Pre-Crime production variables.
 
@@ -86,7 +87,7 @@ Set:
 - `MARAYTI_MANAGED_WEBHOOK_MASTER_SECRET` — separate random secret for managed webhook derivation.
 - `FACTORY_MANAGER_BOT_TOKEN` — the factory/manager bot token with admin rights in `@K_J6k`.
 - Existing `DATABASE_URL`.
-- `WEBHOOK_BASE_URL` if the automatic `VERCEL_URL` value is not the stable production domain.
+- Set `WEBHOOK_BASE_URL=https://marayti.vercel.app` so Telegram webhooks use the stable production domain.
 
 Managed Marayti data is isolated by PostgreSQL schema `tenant_<bot_id>`. The
 public registry contains only bot identity, owner, lifecycle state, and an
@@ -104,8 +105,9 @@ AES-GCM encrypted token envelope.
 - The source repositories must be deployed after their adapter PRs are merged.
   A factory environment URL alone does not create a Railway service or deploy
   source-side code.
-- Telegram membership checks require the relevant manager/clone bot to have
-  administrator access in `@K_J6k`. Keep that permission in place.
+- Telegram membership checks use the central Factory/manager bot. Keep that bot
+  as an administrator in `@K_J6k`; individual customer-created clone bots do not
+  need channel admin rights.
 - Do not use the factory in production until the source adapter health checks,
   webhook delivery, token encryption, and one real test instance per template
   have been verified.
