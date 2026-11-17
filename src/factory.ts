@@ -1,0 +1,166 @@
+import { randomUUID } from "node:crypto";
+import { sql } from "./db.js";
+import { encryptToken } from "./security.js";
+import { getBotIdentity, getChannelMembership, sendMessage, type TelegramUser } from "./telegram.js";
+
+export const TEMPLATES = {
+  download: { title: "بوت التحميل", description: "تحميل الوسائط من المنصات المدعومة" },
+  "pre-crime": { title: "بوت الحماية", description: "إدارة وحماية مجموعات تيليجرام" },
+  marayti: { title: "بوت مرايتي", description: "نظام المراسلة المجهولة" },
+} as const;
+type TemplateKey = keyof typeof TEMPLATES;
+
+const factoryToken = () => process.env.FACTORY_BOT_TOKEN ?? "";
+const channel = () => process.env.REQUIRED_CHANNEL_ID ?? "@K_J6k";
+const channelUrl = () => process.env.REQUIRED_CHANNEL_URL ?? "https://t.me/K_J6k";
+
+export async function requireMembership(user: TelegramUser, chatId: number): Promise<boolean> {
+  try {
+    const member = await getChannelMembership(factoryToken(), channel(), user.id);
+    if (member) return true;
+  } catch { /* Bot must be able to inspect channel membership. */ }
+  await sendMessage(factoryToken(), chatId,
+    "لازم تشترك في القناة الرسمية أولاً علشان تستخدم المصنع.\nبعد الاشتراك اضغط «تحقق من الاشتراك».",
+    [[{ text: "الاشتراك في القناة", url: channelUrl() }, { text: "تحقق من الاشتراك", callback_data: "check_subscription" }]]);
+  return false;
+}
+
+export async function start(user: TelegramUser, chatId: number): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  await sql`
+    INSERT INTO factory_users(telegram_user_id, username, first_name)
+    VALUES (${user.id}, ${user.username ?? null}, ${user.first_name ?? null})
+    ON CONFLICT(telegram_user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name, updated_at=NOW()
+  `;
+  await sendMessage(factoryToken(), chatId,
+    "~ اهلا بك في اقوى صانع بوتات» .\n~ اصنع بوتك الان وبخطوة واحدة» .\n~ فقط ارسل التوكن» .\n\nاختر القالب الذي تريد تصنيعه:",
+    templateKeyboard(user.id));
+}
+
+function templateKeyboard(userId: number) {
+  return Object.entries(TEMPLATES).map(([key, item]) => [{ text: item.title, callback_data: `template:${key}` }]);
+}
+
+export async function showTemplate(user: TelegramUser, chatId: number, key: string): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  if (!(key in TEMPLATES)) return;
+  const template = key as TemplateKey;
+  const existing = await sql`SELECT status, bot_username FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
+  if (existing.length) {
+    const row = existing[0];
+    await sendMessage(factoryToken(), chatId,
+      `لديك بالفعل نسخة من قالب ${TEMPLATES[template].title}.\nالحالة: ${statusArabic(String(row.status))}${row.bot_username ? `\nالبوت: @${escapeHtml(String(row.bot_username))}` : ""}\nلا يمكن إنشاء نسخة ثانية من نفس القالب.`,
+      [[{ text: "العودة للقوالب", callback_data: "templates" }]]);
+    return;
+  }
+  await sql`
+    INSERT INTO factory_pending_actions(telegram_user_id, action, template_key)
+    VALUES (${user.id}, 'awaiting_token', ${template})
+    ON CONFLICT(telegram_user_id) DO UPDATE SET action='awaiting_token', template_key=EXCLUDED.template_key, created_at=NOW()
+  `;
+  await sendMessage(factoryToken(), chatId,
+    `اخترت: ${TEMPLATES[template].title}\n${TEMPLATES[template].description}\n\nأرسل توكن البوت من BotFather في رسالة واحدة. لن يظهر التوكن في ردود المصنع، وسيتم تخزينه مشفراً.`,
+    [[{ text: "إلغاء", callback_data: "cancel_creation" }]]);
+}
+
+export async function submitToken(user: TelegramUser, chatId: number, rawToken: string): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  const pending = await sql`SELECT template_key FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
+  if (!pending.length) return;
+  const template = String(pending[0].template_key) as TemplateKey;
+  const token = rawToken.trim();
+  if (!/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(token)) {
+    await sendMessage(factoryToken(), chatId, "صيغة التوكن غير صحيحة. أرسل التوكن كما أعطاك BotFather أو اضغط إلغاء.");
+    return;
+  }
+
+  let identity: TelegramUser;
+  try { identity = await getBotIdentity(token); }
+  catch {
+    await sendMessage(factoryToken(), chatId, "التوكن غير صالح أو تعذر الوصول إلى Telegram. راجع التوكن وحاول مرة أخرى.");
+    return;
+  }
+  if (!identity.is_bot) {
+    await sendMessage(factoryToken(), chatId, "التوكن لا يعود إلى بوت صالح. أرسل توكن بوت من BotFather.");
+    return;
+  }
+
+  const requestId = randomUUID();
+  const instanceId = randomUUID();
+  const encrypted = encryptToken(token);
+  try {
+    const inserted = await sql`
+      INSERT INTO factory_instances(id, owner_telegram_id, template_key, status, request_id, bot_id, bot_username, encrypted_token)
+      VALUES (${instanceId}, ${user.id}, ${template}, 'provisioning', ${requestId}, ${identity.id}, ${identity.username ?? null}, ${encrypted})
+      ON CONFLICT(owner_telegram_id, template_key) DO NOTHING
+      RETURNING id
+    `;
+    if (!inserted.length) {
+      await sendMessage(factoryToken(), chatId, "لديك بالفعل نسخة محجوزة أو منشأة من هذا القالب. لن يتم إنشاء نسخة مكررة.");
+      return;
+    }
+    await sql`DELETE FROM factory_pending_actions WHERE telegram_user_id=${user.id}`;
+    await sendMessage(factoryToken(), chatId,
+      `تم التحقق من التوكن بنجاح للبوت @${escapeHtml(identity.username ?? "بدون اسم")}.\n\nحُجز طلب التصنيع بأمان. جارٍ تجهيز الربط مع محرك القالب؛ لن نعلن نجاح التشغيل قبل تأكيد الخدمة الأصلية.`,
+      [[{ text: "حالة النسخة", callback_data: `instance:${template}` }, { text: "القوالب", callback_data: "templates" }]]);
+    await provisionTemplate(template, { requestId, ownerId: user.id, token });
+  } catch (error) {
+    const code = safeCode(error);
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE request_id=${requestId}`;
+    await sendMessage(factoryToken(), chatId, "تعذر إكمال حجز النسخة بسبب خطأ داخلي آمن. احتفظنا برمز الخطأ: " + code);
+  }
+}
+
+async function provisionTemplate(template: TemplateKey, payload: { requestId: string; ownerId: number; token: string }): Promise<void> {
+  const envNames: Record<TemplateKey, string> = {
+    download: "DOWNLOAD_PROVISION_URL",
+    "pre-crime": "PRECRIME_PROVISION_URL",
+    marayti: "MARAYTI_PROVISION_URL",
+  };
+  const url = process.env[envNames[template]];
+  if (!url) {
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_ADAPTER_NOT_CONFIGURED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+  // Integration is deliberately fail-closed until source-side authenticated endpoints are deployed.
+  const body = JSON.stringify({ request_id: payload.requestId, owner_telegram_id: payload.ownerId, template, bot_token: payload.token });
+  const { signServiceRequest } = await import("./security.js");
+  const path = new URL(url).pathname;
+  const signed = signServiceRequest("POST", path, body);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature, "idempotency-key": payload.requestId },
+    body,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_PROVISION_FAILED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+  const result = await response.json() as { instance_id?: string; bot_id?: number; bot_username?: string; status?: string };
+  await sql`UPDATE factory_instances SET status='active', source_instance_id=${result.instance_id ?? null}, bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null}, updated_at=NOW() WHERE request_id=${payload.requestId}`;
+}
+
+export async function showTemplates(user: TelegramUser, chatId: number): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  await sendMessage(factoryToken(), chatId, "قوالب المصنع المتاحة:", templateKeyboard(user.id));
+}
+
+export async function showInstance(user: TelegramUser, chatId: number, template: string): Promise<void> {
+  const rows = await sql`SELECT status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
+  if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة مسجلة من هذا القالب.");
+  const row = rows[0];
+  await sendMessage(factoryToken(), chatId,
+    `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`,
+    [[{ text: "القوالب", callback_data: "templates" }]]);
+}
+
+function statusArabic(status: string): string {
+  const values: Record<string,string> = { reserved:"محجوزة", awaiting_token:"بانتظار التوكن", provisioning:"قيد التصنيع", active:"تعمل", paused:"متوقفة مؤقتاً", failed:"لم يكتمل التصنيع" };
+  return values[status] ?? "غير معروفة";
+}
+function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]!)); }
+function safeCode(error: unknown): string {
+  if (error instanceof Error && /^[a-z0-9_]{3,60}$/i.test(error.message)) return error.message;
+  return "FACTORY_INTERNAL_ERROR";
+}
