@@ -35,17 +35,23 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       if (update.message.text === "/start") await start(user, chatId);
       else if (update.message.text === "/templates") await showTemplates(user, chatId);
       else if (update.message.text && !update.message.text.startsWith("/")) {
-        // Remove the submitted credential from chat history immediately after processing.
-        try {
-          await deleteMessage(token, chatId, update.message.message_id);
-        } catch {
-          console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
-          await sendMessage(token, chatId,
-            "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
-          await markUpdateDone(claimedUpdateId);
-          res.statusCode = 200; res.end("OK"); return;
+        const { sql } = await import("../src/db.js");
+        const pending = await sql`SELECT 1 FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
+        if (!pending.length) {
+          await sendMessage(token, chatId, "اختار القالب الأول من القائمة، وبعدها ابعت توكن البوت.");
+        } else {
+          // Remove the submitted credential from chat history before using it.
+          try {
+            await deleteMessage(token, chatId, update.message.message_id);
+          } catch {
+            console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
+            await sendMessage(token, chatId,
+              "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
+            await markUpdateDone(claimedUpdateId);
+            res.statusCode = 200; res.end("OK"); return;
+          }
+          await submitToken(user, chatId, update.message.text);
         }
-        await submitToken(user, chatId, update.message.text);
       }
     }
     if (update.callback_query) {
