@@ -34,6 +34,10 @@ export async function sendMessage(token: string, chatId: number, text: string, k
   });
 }
 
+export async function deleteMessage(token: string, chatId: number, messageId: number): Promise<void> {
+  await call(token, "deleteMessage", { chat_id: chatId, message_id: messageId });
+}
+
 export async function answerCallback(token: string, callbackId: string, text?: string): Promise<void> {
   await call(token, "answerCallbackQuery", { callback_query_id: callbackId, ...(text ? { text } : {}) });
 }
