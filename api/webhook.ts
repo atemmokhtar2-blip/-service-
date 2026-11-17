@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, recordUpdate } from "../src/db.js";
 import { answerCallback, deleteMessage } from "../src/telegram.js";
-import { showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
+import { retryProvision, showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -50,6 +50,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
           await showTemplates(q.from, chatId);
         } else if (q.data?.startsWith("template:")) await showTemplate(q.from, chatId, q.data.slice(9));
         else if (q.data?.startsWith("instance:")) await showInstance(q.from, chatId, q.data.slice(9));
+        else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6));
       }
     }
     res.statusCode = 200; res.end("OK");
