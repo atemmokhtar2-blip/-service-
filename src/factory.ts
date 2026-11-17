@@ -193,6 +193,7 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
   const row = rows[0];
   const keyboard = [
     ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
+    ...(String(row.status) === "provisioning" ? [[{ text: "تحديث الحالة", callback_data: `instance:${template}` }]] : []),
     [{ text: "القوالب", callback_data: "templates" }],
   ];
   await sendMessage(factoryToken(), chatId,
