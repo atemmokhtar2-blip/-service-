@@ -1,13 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, recordUpdate } from "../src/db.js";
-import { answerCallback } from "../src/telegram.js";
+import { answerCallback, deleteMessage } from "../src/telegram.js";
 import { showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
 type TelegramUpdate = {
   update_id?: number;
-  message?: { chat?: { id?: number; type?: string }; from?: { id: number; username?: string; first_name?: string; is_bot?: boolean }; text?: string };
+  message?: { message_id: number; chat?: { id?: number; type?: string }; from?: { id: number; username?: string; first_name?: string; is_bot?: boolean }; text?: string };
   callback_query?: { id: string; data?: string; from: { id: number; username?: string; first_name?: string; is_bot?: boolean }; message?: { chat?: { id?: number } } };
 };
 
@@ -29,7 +29,13 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       const chatId = update.message.chat.id;
       if (update.message.text === "/start") await start(user, chatId);
       else if (update.message.text === "/templates") await showTemplates(user, chatId);
-      else if (update.message.text && !update.message.text.startsWith("/")) await submitToken(user, chatId, update.message.text);
+      else if (update.message.text && !update.message.text.startsWith("/")) {
+        // Remove the submitted credential from chat history immediately after processing.
+        try { await deleteMessage(token, chatId, update.message.message_id); } catch {
+          console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
+        }
+        await submitToken(user, chatId, update.message.text);
+      }
     }
     if (update.callback_query) {
       const q = update.callback_query;
