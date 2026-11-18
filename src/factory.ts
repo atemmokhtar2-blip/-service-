@@ -62,7 +62,7 @@ function templateKeyboard(userId: number) {
 
 export async function showTemplate(user: TelegramUser, chatId: number, key: string): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
-  if (!(key in TEMPLATES)) return;
+  if (!getTemplateDefinition(key)) return;
   const template = key as TemplateKey;
   const existing = await sql`SELECT status, bot_username FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
   if (existing.length) {
@@ -269,7 +269,7 @@ async function refreshDownloadStatus(requestId: string): Promise<void> {
 
 export async function showInstance(user: TelegramUser, chatId: number, template: string): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
-  if (!(template in TEMPLATES)) return;
+  if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
   if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة مسجلة من هذا القالب.");
