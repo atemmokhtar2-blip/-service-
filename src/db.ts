@@ -27,10 +27,6 @@ export async function ensureSchema(): Promise<void> {
       UNIQUE(owner_telegram_id, template_key)
     )
   `;
-  // Template keys are validated against the application registry. Keep the
-  // database extensible so registering template #4..#60 does not need a DDL edit.
-  await sql`ALTER TABLE factory_instances DROP CONSTRAINT IF EXISTS factory_instances_template_key_check`;
-  await sql`ALTER TABLE factory_pending_actions DROP CONSTRAINT IF EXISTS factory_pending_actions_template_key_check`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_instances_owner_template_unique ON factory_instances(owner_telegram_id, template_key)`;
   await sql`CREATE INDEX IF NOT EXISTS factory_instances_owner_idx ON factory_instances(owner_telegram_id, created_at DESC)`;
   await sql`
@@ -41,6 +37,10 @@ export async function ensureSchema(): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // Template keys are validated against the application registry. Keep the
+  // database extensible so registering template #4..#60 does not need a DDL edit.
+  await sql`ALTER TABLE factory_instances DROP CONSTRAINT IF EXISTS factory_instances_template_key_check`;
+  await sql`ALTER TABLE factory_pending_actions DROP CONSTRAINT IF EXISTS factory_pending_actions_template_key_check`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_telegram_updates (
       update_id BIGINT PRIMARY KEY,
