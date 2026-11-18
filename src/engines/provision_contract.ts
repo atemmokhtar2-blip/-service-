@@ -101,6 +101,74 @@ export function validateProvisionResponse(
   };
 }
 
+export function validateProvisionStatus(
+  input: unknown,
+  expected: {
+    requestId: string;
+    ownerId: number;
+    botId: number;
+    botUsername?: string;
+    template: TemplateDefinition;
+  },
+): ValidationResult<{
+  instanceId: string;
+  botId: number;
+  botUsername?: string;
+  status: "active" | "provisioning" | "failed";
+  errorCode?: string;
+}> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, code: "SOURCE_STATUS_NOT_OBJECT" };
+  }
+  const value = input as Record<string, unknown>;
+  if (value.contract_version !== expected.template.contractVersion) {
+    return { ok: false, code: "SOURCE_STATUS_CONTRACT_VERSION_MISMATCH" };
+  }
+  if (value.request_id !== expected.requestId) {
+    return { ok: false, code: "SOURCE_STATUS_REQUEST_ID_MISMATCH" };
+  }
+  if (typeof value.instance_id !== "string" || !value.instance_id.trim() || value.instance_id.length > 128) {
+    return { ok: false, code: "SOURCE_STATUS_INSTANCE_ID_INVALID" };
+  }
+  if (typeof value.bot_id !== "number" || !Number.isSafeInteger(value.bot_id)
+    || value.bot_id <= 0 || value.bot_id !== expected.botId) {
+    return { ok: false, code: "SOURCE_STATUS_BOT_ID_MISMATCH" };
+  }
+  if (value.bot_username !== undefined && value.bot_username !== null) {
+    if (typeof value.bot_username !== "string" || !USERNAME_PATTERN.test(value.bot_username)) {
+      return { ok: false, code: "SOURCE_STATUS_BOT_USERNAME_INVALID" };
+    }
+    if (expected.botUsername && value.bot_username.toLowerCase() !== expected.botUsername.toLowerCase()) {
+      return { ok: false, code: "SOURCE_STATUS_BOT_USERNAME_MISMATCH" };
+    }
+  } else if (expected.botUsername) {
+    return { ok: false, code: "SOURCE_STATUS_BOT_USERNAME_MISSING" };
+  }
+  if (value.status !== "active" && value.status !== "provisioning" && value.status !== "failed") {
+    return { ok: false, code: "SOURCE_STATUS_INVALID" };
+  }
+  if (expected.template.requiresPrimaryAdmin) {
+    if (value.owner_admin_confirmed !== true || value.primary_admin_id !== expected.ownerId) {
+      return { ok: false, code: "SOURCE_STATUS_OWNER_ADMIN_MISMATCH" };
+    }
+  }
+  const errorCode = value.error_code;
+  if (errorCode !== undefined && errorCode !== null
+    && (typeof errorCode !== "string" || !/^[a-z0-9_]{1,80}$/i.test(errorCode))) {
+    return { ok: false, code: "SOURCE_STATUS_ERROR_CODE_INVALID" };
+  }
+  return {
+    ok: true,
+    value: {
+      instanceId: value.instance_id,
+      botId: value.bot_id,
+      ...(typeof value.bot_username === "string" ? { botUsername: value.bot_username } : {}),
+      status: value.status,
+      ...(typeof errorCode === "string" ? { errorCode } : {}),
+    },
+  };
+}
+
 export function validateProvisionUrl(raw: string): URL | null {
   try {
     const url = new URL(raw);
