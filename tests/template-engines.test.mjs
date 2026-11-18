@@ -18,6 +18,7 @@ const definition = (key) => ({
   contractVersion: 1,
   readiness: { kind: "provision-only" },
   requiresPrimaryAdmin: false,
+  acceptLegacyResponse: false,
 });
 
 test("registry supports more than fifty templates without a switch statement", () => {
@@ -37,6 +38,8 @@ test("registry rejects duplicate keys and malformed adapter configuration", () =
 test("built-in template catalog contains the current three adapters", () => {
   assert.deepEqual(listTemplates().map(item => item.key), ["download", "pre-crime", "marayti"]);
   assert.equal(TEMPLATE_REGISTRY.get("download")?.requiresPrimaryAdmin, true);
+  assert.equal(TEMPLATE_REGISTRY.get("download")?.acceptLegacyResponse, false);
+  assert.equal(TEMPLATE_REGISTRY.get("marayti")?.acceptLegacyResponse, true);
 });
 
 test("provision input validator fails closed on invalid owner, template, or token", () => {
@@ -71,4 +74,12 @@ test("adapter result must attest request, bot identity, contract version, and Do
   assert.equal(validateProvisionResponse({ ...valid, owner_admin_confirmed: false }, expected).ok, false);
   assert.equal(validateProvisionResponse({ ...valid, primary_admin_id: 9 }, expected).ok, false);
   assert.equal(validateProvisionResponse({ ...valid, status: "success" }, expected).ok, false);
+  const legacyTemplate = TEMPLATE_REGISTRY.get("marayti");
+  assert.equal(validateProvisionResponse({
+    request_id: "req-123", instance_id: "legacy-1", bot_id: 987654321,
+    bot_username: "example_download_bot", status: "provisioning",
+  }, { ...expected, template: legacyTemplate }).ok, true);
+  assert.equal(validateProvisionResponse({
+    ...valid, contract_version: undefined,
+  }, expected).ok, false);
 });
