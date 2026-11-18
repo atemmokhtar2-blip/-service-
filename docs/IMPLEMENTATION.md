@@ -51,3 +51,31 @@ See `.env.example`. Never paste production credentials into source files, GitHub
 
 ## Important current limitation
 The source adapters are not live until the matching authenticated endpoints have been implemented and deployed in Download (Railway), Pre-Crime (Vercel), and Marayti (Vercel). The factory must fail closed with a clear unavailable message instead of pretending that a bot was created.
+
+
+## Extensible template engines and source contract
+
+Template definitions live in `src/engines/template_registry.ts`; provisioning validation
+lives in `src/engines/provision_contract.ts`. The catalog is data-driven rather than
+a three-key switch. Each template declares its unique key, display metadata, provision
+URL environment variable, contract version, readiness policy, primary-admin
+attestation requirement, and whether a known legacy response is temporarily accepted.
+
+The factory validates the template key and BotFather token before reserving an
+instance. Before provisioning, adapters with an HTTP readiness policy must return
+JSON with `ready: true`. The provision request carries `contract_version: 1`.
+The response is accepted only when its request ID, instance ID, Telegram bot ID,
+bot username, and status match the expected values. Download additionally must
+attest `owner_admin_confirmed: true` and `primary_admin_id` equal to the Telegram
+user who requested the copy. Provision requests do not follow HTTP redirects;
+adapter URLs must use HTTPS outside loopback development.
+
+The existing Pre-Crime and Marayti definitions temporarily opt into the explicit
+legacy-response flag because their adapter contract predates version 1. This is
+not the default for new templates. Once those adapters return `contract_version: 1`,
+remove their compatibility flags. A new template must use strict versioned
+responses by default.
+
+Adding template #4 or #60 is a registry entry plus its source adapter and tests;
+there is no longer a hard-coded SQL allow-list to edit. The application registry
+is the authoritative allow-list, and duplicate/invalid registrations fail closed.
