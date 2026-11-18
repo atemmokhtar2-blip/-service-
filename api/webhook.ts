@@ -8,7 +8,7 @@ export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 type TelegramUpdate = {
   update_id?: number;
   message?: { message_id: number; chat?: { id?: number; type?: string }; from?: { id: number; username?: string; first_name?: string; is_bot?: boolean }; text?: string };
-  callback_query?: { id: string; data?: string; from: { id: number; username?: string; first_name?: string; is_bot?: boolean }; message?: { chat?: { id?: number } } };
+  callback_query?: { id: string; data?: string; from: { id: number; username?: string; first_name?: string; is_bot?: boolean }; message?: { message_id: number; chat?: { id?: number } } };
 };
 
 export default async function handler(req: IncomingMessage & { body?: TelegramUpdate }, res: ServerResponse) {
@@ -60,7 +60,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       if (chatId) {
         await answerCallback(token, q.id);
         if (q.data === "templates") await showTemplates(q.from, chatId);
-        else if (q.data === "check_subscription") await start(q.from, chatId);
+        else if (q.data === "check_subscription") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "cancel_creation") {
           const { sql } = await import("../src/db.js");
           await sql`DELETE FROM factory_pending_actions WHERE telegram_user_id=${q.from.id}`;
