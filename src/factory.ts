@@ -4,13 +4,11 @@ import { decryptToken, encryptToken, signServiceRequest } from "./security.js";
 import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, type TelegramUser } from "./telegram.js";
 import { isFactoryAdmin } from "./subscription.js";
 import { diagnosticCode } from "./diagnostics.js";
+import { getTemplateDefinition, templateMenuRecord } from "./engines/template_registry.js";
+import { checkTemplateReadiness, validateProvisionInput, validateProvisionResponse, validateProvisionUrl } from "./engines/provision_contract.js";
 
-export const TEMPLATES = {
-  download: { title: "بوت التحميل", description: "تحميل الوسائط من المنصات المدعومة" },
-  "pre-crime": { title: "بوت الحماية", description: "إدارة وحماية مجموعات تيليجرام" },
-  marayti: { title: "بوت مرايتي", description: "نظام المراسلة المجهولة" },
-} as const;
-type TemplateKey = keyof typeof TEMPLATES;
+export const TEMPLATES = templateMenuRecord();
+type TemplateKey = string;
 
 const factoryToken = () => process.env.FACTORY_BOT_TOKEN ?? "";
 const channel = () => process.env.REQUIRED_CHANNEL_ID ?? "@K_J6k";
@@ -92,11 +90,12 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
   const pending = await sql`SELECT template_key FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
   if (!pending.length) return;
   const template = String(pending[0].template_key) as TemplateKey;
-  const token = rawToken.trim();
-  if (!/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(token)) {
-    await sendMessage(factoryToken(), chatId, "صيغة التوكن غير صحيحة. أرسل التوكن كما أعطاك BotFather أو اضغط إلغاء.");
+  const input = validateProvisionInput({ ownerId: user.id, templateKey: template, token: rawToken });
+  if (!input.ok) {
+    await sendMessage(factoryToken(), chatId, "تعذّر التحقق من بيانات التصنيع. تأكد من اختيار قالب مسجل وإرسال توكن صحيح.");
     return;
   }
+  const token = input.value.token;
 
   let identity: TelegramUser;
   try { identity = await getBotIdentity(token); }
@@ -127,7 +126,7 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
     await sendMessage(factoryToken(), chatId,
       `تم التحقق من التوكن بنجاح للبوت @${escapeHtml(identity.username ?? "بدون اسم")}.\n\nحُجز طلب التصنيع بأمان. جارٍ تجهيز الربط مع محرك القالب؛ لن نعلن نجاح التشغيل قبل تأكيد الخدمة الأصلية.`,
       [[{ text: "حالة النسخة", callback_data: `instance:${template}` }, { text: "القوالب", callback_data: "templates" }]]);
-    await provisionTemplate(template, { requestId, ownerId: user.id, token });
+    await provisionTemplate(template, { requestId, ownerId: user.id, token, identity });
     await showInstance(user, chatId, template);
   } catch (error) {
     const code = safeCode(error);
@@ -136,36 +135,59 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
   }
 }
 
-async function provisionTemplate(template: TemplateKey, payload: { requestId: string; ownerId: number; token: string }): Promise<void> {
-  const envNames: Record<TemplateKey, string> = {
-    download: "DOWNLOAD_PROVISION_URL",
-    "pre-crime": "PRECRIME_PROVISION_URL",
-    marayti: "MARAYTI_PROVISION_URL",
-  };
-  const url = process.env[envNames[template]];
+async function provisionTemplate(
+  template: TemplateKey,
+  payload: { requestId: string; ownerId: number; token: string; identity: TelegramUser },
+): Promise<void> {
+  const definition = getTemplateDefinition(template);
+  if (!definition) {
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='TEMPLATE_NOT_REGISTERED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+  const url = process.env[definition.provisionUrlEnv];
   if (!url) {
-    console.error(JSON.stringify({ event: "factory_source_provision_config_missing", request_id: payload.requestId, template, env_key: envNames[template] }));
+    console.error(JSON.stringify({ event: "factory_source_provision_config_missing", request_id: payload.requestId, template, env_key: definition.provisionUrlEnv }));
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_ADAPTER_NOT_CONFIGURED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
+
   const startedAt = Date.now();
-  let endpoint: URL;
-  try {
-    endpoint = new URL(url);
-  } catch {
+  const endpoint = validateProvisionUrl(url);
+  if (!endpoint) {
     console.error(JSON.stringify({ event: "factory_source_provision_bad_url", request_id: payload.requestId, template }));
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_URL_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
-  const body = JSON.stringify({ request_id: payload.requestId, owner_telegram_id: payload.ownerId, template, bot_token: payload.token });
-  const { signServiceRequest } = await import("./security.js");
+
+  const readiness = await checkTemplateReadiness(endpoint, definition);
+  if (!readiness.ok) {
+    console.error(JSON.stringify({ event: "factory_source_readiness_failed", request_id: payload.requestId, template, failure_code: readiness.code }));
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code=${readiness.code}, updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+
+  const body = JSON.stringify({
+    contract_version: definition.contractVersion,
+    request_id: payload.requestId,
+    owner_telegram_id: payload.ownerId,
+    template,
+    bot_token: payload.token,
+  });
   const path = endpoint.pathname;
   let response: Response;
   try {
     const signed = signServiceRequest("POST", path, body);
     response = await fetch(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature, "idempotency-key": payload.requestId },
+      redirect: "error",
+      headers: {
+        "content-type": "application/json",
+        "accept": "application/json",
+        "x-factory-timestamp": signed.timestamp,
+        "x-factory-signature": signed.signature,
+        "idempotency-key": payload.requestId,
+        "x-factory-contract-version": String(definition.contractVersion),
+      },
       body,
       signal: AbortSignal.timeout(15_000),
     });
@@ -186,22 +208,33 @@ async function provisionTemplate(template: TemplateKey, payload: { requestId: st
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_PROVISION_FAILED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
-  let result: { instance_id?: string; bot_id?: number; bot_username?: string; status?: string };
+
+  let rawResult: unknown;
   try {
-    result = await response.json() as typeof result;
+    rawResult = await response.json();
   } catch {
     console.error(JSON.stringify({ event: "factory_source_provision_invalid_json", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, duration_ms: Date.now() - startedAt }));
-    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID_JSON', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
-  if (!result.instance_id || !["active", "provisioning"].includes(String(result.status))) {
-    console.error(JSON.stringify({ event: "factory_source_provision_invalid_response", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, response_code: diagnosticCode((result as Record<string, unknown>).error_code ?? (result as Record<string, unknown>).code), has_instance_id: Boolean(result.instance_id), returned_status: diagnosticCode(result.status) }));
-    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+
+  const contract = validateProvisionResponse(rawResult, {
+    requestId: payload.requestId,
+    ownerId: payload.ownerId,
+    botId: payload.identity.id,
+    botUsername: payload.identity.username,
+    template: definition,
+  });
+  if (!contract.ok) {
+    console.error(JSON.stringify({ event: "factory_source_contract_rejected", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, failure_code: contract.code, duration_ms: Date.now() - startedAt }));
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code=${contract.code}, updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
+
+  const result = contract.value;
   console.info(JSON.stringify({ event: "factory_source_provision_accepted", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, source_status: result.status, duration_ms: Date.now() - startedAt }));
   const state = result.status === "active" ? "active" : "provisioning";
-  await sql`UPDATE factory_instances SET status=${state}, source_instance_id=${result.instance_id}, bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null}, safe_error_code=NULL, updated_at=NOW() WHERE request_id=${payload.requestId}`;
+  await sql`UPDATE factory_instances SET status=${state}, source_instance_id=${result.instanceId}, bot_id=${result.botId}, bot_username=${result.botUsername ?? null}, safe_error_code=NULL, updated_at=NOW() WHERE request_id=${payload.requestId}`;
 }
 
 export async function showTemplates(user: TelegramUser, chatId: number): Promise<void> {
@@ -270,9 +303,11 @@ export async function retryProvision(user: TelegramUser, chatId: number, templat
   if (String(row.status) !== "failed") return showInstance(user, chatId, key);
   try {
     const token = decryptToken(String(row.encrypted_token));
+    const identity = await getBotIdentity(token);
+    if (!identity.is_bot) throw new Error("INVALID_BOT_IDENTITY");
     const requestId = String(row.request_id);
     await sql`UPDATE factory_instances SET status='provisioning', safe_error_code=NULL, updated_at=NOW() WHERE request_id=${requestId}`;
-    await provisionTemplate(key, { requestId, ownerId: user.id, token });
+    await provisionTemplate(key, { requestId, ownerId: user.id, token, identity });
   } catch (error) {
     const code = safeCode(error);
     await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE owner_telegram_id=${user.id} AND template_key=${key}`;
