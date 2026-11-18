@@ -5,7 +5,7 @@ import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, typ
 import { isFactoryAdmin } from "./subscription.js";
 import { diagnosticCode } from "./diagnostics.js";
 import { getTemplateDefinition, templateMenuRecord } from "./engines/template_registry.js";
-import { checkTemplateReadiness, validateProvisionInput, validateProvisionResponse, validateProvisionUrl } from "./engines/provision_contract.js";
+import { checkTemplateReadiness, validateProvisionInput, validateProvisionResponse, validateProvisionStatus, validateProvisionUrl } from "./engines/provision_contract.js";
 
 export const TEMPLATES = templateMenuRecord();
 type TemplateKey = string;
@@ -244,23 +244,72 @@ export async function showTemplates(user: TelegramUser, chatId: number): Promise
 
 async function refreshDownloadStatus(requestId: string): Promise<void> {
   const base = process.env.DOWNLOAD_PROVISION_URL;
-  if (!base) return;
+  const baseUrl = base ? validateProvisionUrl(base) : null;
+  const template = getTemplateDefinition("download");
+  if (!baseUrl || !template) return;
+
   try {
-    const endpoint = new URL(`/internal/factory/status/${requestId}`, base);
+    const expectedRows = await sql`
+      SELECT owner_telegram_id, bot_id, bot_username, source_instance_id, template_key
+      FROM factory_instances WHERE request_id=${requestId} LIMIT 1
+    `;
+    if (!expectedRows.length || String(expectedRows[0].template_key) !== "download") return;
+    const expected = expectedRows[0];
+    const ownerId = Number(expected.owner_telegram_id);
+    const botId = Number(expected.bot_id);
+    if (!Number.isSafeInteger(ownerId) || ownerId <= 0 || !Number.isSafeInteger(botId) || botId <= 0) return;
+
+    const endpoint = new URL(`/internal/factory/status/${encodeURIComponent(requestId)}`, baseUrl.origin);
     const signed = signServiceRequest("GET", endpoint.pathname, "");
     const response = await fetch(endpoint, {
       method: "GET",
-      headers: { "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature },
+      redirect: "error",
+      headers: {
+        accept: "application/json",
+        "x-factory-timestamp": signed.timestamp,
+        "x-factory-signature": signed.signature,
+        "x-factory-contract-version": String(template.contractVersion),
+      },
       signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) return;
-    const result = await response.json() as { status?: string; bot_id?: number; bot_username?: string; instance_id?: string; error_code?: string };
-    if (!["active", "provisioning", "failed"].includes(String(result.status))) return;
+
+    const rawResult: unknown = await response.json();
+    const contract = validateProvisionStatus(rawResult, {
+      requestId,
+      ownerId,
+      botId,
+      botUsername: typeof expected.bot_username === "string" ? expected.bot_username : undefined,
+      template,
+    });
+    if (!contract.ok) {
+      console.error(JSON.stringify({
+        event: "factory_source_status_contract_rejected",
+        request_id: requestId,
+        failure_code: contract.code,
+      }));
+      await sql`
+        UPDATE factory_instances SET status='failed', safe_error_code=${contract.code}, updated_at=NOW()
+        WHERE request_id=${requestId} AND owner_telegram_id=${ownerId}
+      `;
+      return;
+    }
+    if (expected.source_instance_id
+      && String(expected.source_instance_id) !== contract.value.instanceId) {
+      await sql`
+        UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_STATUS_INSTANCE_MISMATCH', updated_at=NOW()
+        WHERE request_id=${requestId} AND owner_telegram_id=${ownerId}
+      `;
+      return;
+    }
+
     await sql`
-      UPDATE factory_instances SET status=${result.status}, source_instance_id=${result.instance_id ?? null},
-        bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null},
-        safe_error_code=${result.error_code ?? null}, updated_at=NOW()
-      WHERE request_id=${requestId}
+      UPDATE factory_instances SET status=${contract.value.status},
+        source_instance_id=${contract.value.instanceId},
+        bot_id=${contract.value.botId},
+        bot_username=${contract.value.botUsername ?? null},
+        safe_error_code=${contract.value.errorCode ?? null}, updated_at=NOW()
+      WHERE request_id=${requestId} AND owner_telegram_id=${ownerId}
     `;
   } catch {
     // Status refresh is best-effort; the durable source record remains authoritative.
@@ -290,7 +339,7 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
 
 export async function retryProvision(user: TelegramUser, chatId: number, template: string): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
-  if (!(template in TEMPLATES)) return;
+  if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   const rows = await sql`
     SELECT request_id, encrypted_token, status
