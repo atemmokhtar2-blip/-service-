@@ -52,7 +52,11 @@ export function validateProvisionResponse(
     return { ok: false, code: "SOURCE_RESPONSE_NOT_OBJECT" };
   }
   const value = input as Record<string, unknown>;
-  if (value.contract_version !== expected.template.contractVersion) {
+  if (value.contract_version === undefined || value.contract_version === null) {
+    if (!expected.template.acceptLegacyResponse) {
+      return { ok: false, code: "SOURCE_CONTRACT_VERSION_MISMATCH" };
+    }
+  } else if (value.contract_version !== expected.template.contractVersion) {
     return { ok: false, code: "SOURCE_CONTRACT_VERSION_MISMATCH" };
   }
   if (value.request_id !== expected.requestId) {
