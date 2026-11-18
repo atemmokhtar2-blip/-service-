@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test",
     "build": "tsc --noEmit",
-    "register:webhook": "node scripts/register-webhook.mjs"
+    "register:webhook": "node scripts/register-webhook.mjs",
+    "vercel-build": "npm run build && if [ \"$VERCEL_ENV\" = \"production\" ]; then npm run register:webhook; fi"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2"
