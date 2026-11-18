@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "./db.js";
 import { decryptToken, encryptToken, signServiceRequest } from "./security.js";
-import { getBotIdentity, getChannelMembership, sendMessage, type TelegramUser } from "./telegram.js";
+import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, type TelegramUser } from "./telegram.js";
+import { isFactoryAdmin } from "./subscription.js";
 
 export const TEMPLATES = {
   download: { title: "بوت التحميل", description: "تحميل الوسائط من المنصات المدعومة" },
@@ -14,27 +15,46 @@ const factoryToken = () => process.env.FACTORY_BOT_TOKEN ?? "";
 const channel = () => process.env.REQUIRED_CHANNEL_ID ?? "@K_J6k";
 const channelUrl = () => process.env.REQUIRED_CHANNEL_URL ?? "https://t.me/K_J6k";
 
-export async function requireMembership(user: TelegramUser, chatId: number): Promise<boolean> {
+const subscriptionPrompt = "🔐 <b>التحقق من صلاحية الدخول</b>\n\n<b>أهلاً بك في مصنع البوتات</b>\nللاستمرار، اشترك في القناة الرسمية أولاً، ثم اضغط «تحقق من الاشتراك».\n\n👑 <b>مالك القناة ومشرفوها:</b> دخول مباشر عند تأكيد صلاحياتهم من Telegram.";
+
+const subscriptionKeyboard = [[
+  { text: "الاشتراك في القناة", url: channelUrl() },
+  { text: "تحقق من الاشتراك", callback_data: "check_subscription" },
+]];
+
+export async function requireMembership(user: TelegramUser, chatId: number, messageId?: number): Promise<boolean> {
+  if (isFactoryAdmin(user.id, process.env.FACTORY_ADMIN_IDS)) return true;
   try {
-    const member = await getChannelMembership(factoryToken(), channel(), user.id);
-    if (member) return true;
-  } catch { /* Bot must be able to inspect channel membership. */ }
-  await sendMessage(factoryToken(), chatId,
-    "لازم تشترك في القناة الرسمية أولاً علشان تستخدم المصنع.\nبعد الاشتراك اضغط «تحقق من الاشتراك».",
-    [[{ text: "الاشتراك في القناة", url: channelUrl() }, { text: "تحقق من الاشتراك", callback_data: "check_subscription" }]]);
+    if (await getChannelMembership(factoryToken(), channel(), user.id)) return true;
+  } catch { /* A Telegram membership lookup failure must not grant access. */ }
+
+  if (messageId !== undefined) {
+    try {
+      await editMessageText(factoryToken(), chatId, messageId, subscriptionPrompt, subscriptionKeyboard);
+    } catch {
+      // Do not send a second copy if Telegram cannot edit the original prompt.
+      console.warn("factory_subscription_prompt_edit_failed");
+    }
+  } else {
+    await sendMessage(factoryToken(), chatId, subscriptionPrompt, subscriptionKeyboard);
+  }
   return false;
 }
 
-export async function start(user: TelegramUser, chatId: number): Promise<void> {
-  if (!(await requireMembership(user, chatId))) return;
+const welcomeText = "~ اهلا بك في اقوى صانع بوتات» .\n~ اصنع بوتك الان وبخطوة واحدة» .\n~ فقط ارسل التوكن» .\n\nاختر القالب الذي تريد تصنيعه:";
+
+export async function start(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
+  if (!(await requireMembership(user, chatId, messageId))) return;
   await sql`
     INSERT INTO factory_users(telegram_user_id, username, first_name)
     VALUES (${user.id}, ${user.username ?? null}, ${user.first_name ?? null})
     ON CONFLICT(telegram_user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name, updated_at=NOW()
   `;
-  await sendMessage(factoryToken(), chatId,
-    "~ اهلا بك في اقوى صانع بوتات» .\n~ اصنع بوتك الان وبخطوة واحدة» .\n~ فقط ارسل التوكن» .\n\nاختر القالب الذي تريد تصنيعه:",
-    templateKeyboard(user.id));
+  if (messageId !== undefined) {
+    await editMessageText(factoryToken(), chatId, messageId, welcomeText, templateKeyboard(user.id));
+  } else {
+    await sendMessage(factoryToken(), chatId, welcomeText, templateKeyboard(user.id));
+  }
 }
 
 function templateKeyboard(userId: number) {

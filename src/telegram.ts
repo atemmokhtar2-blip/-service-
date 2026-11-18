@@ -1,3 +1,5 @@
+import { isAllowedChannelMember } from "./subscription.js";
+
 const API = "https://api.telegram.org";
 
 export type TelegramUser = { id: number; username?: string; first_name?: string; is_bot?: boolean };
@@ -21,12 +23,23 @@ export async function getBotIdentity(token: string): Promise<TelegramUser> {
 
 export async function getChannelMembership(token: string, channel: string, userId: number): Promise<boolean> {
   const member = await call<{ status: string; is_member?: boolean }>(token, "getChatMember", { chat_id: channel, user_id: userId });
-  return ["creator", "administrator", "member"].includes(member.status) || (member.status === "restricted" && member.is_member === true);
+  return isAllowedChannelMember(member);
 }
 
 export async function sendMessage(token: string, chatId: number, text: string, keyboard?: InlineButton[][]): Promise<void> {
   await call(token, "sendMessage", {
     chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
+export async function editMessageText(token: string, chatId: number, messageId: number, text: string, keyboard?: InlineButton[][]): Promise<void> {
+  await call(token, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
