@@ -22,10 +22,6 @@ CREATE TABLE IF NOT EXISTS factory_instances (
   UNIQUE(owner_telegram_id, template_key)
 );
 
--- Template keys are validated against the application registry, not a fixed SQL list.
-ALTER TABLE factory_instances DROP CONSTRAINT IF EXISTS factory_instances_template_key_check;
-ALTER TABLE factory_pending_actions DROP CONSTRAINT IF EXISTS factory_pending_actions_template_key_check;
-
 CREATE INDEX IF NOT EXISTS factory_instances_owner_idx
   ON factory_instances(owner_telegram_id, created_at DESC);
 
@@ -35,6 +31,10 @@ CREATE TABLE IF NOT EXISTS factory_pending_actions (
   template_key TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Template keys are validated against the application registry, not a fixed SQL list.
+ALTER TABLE factory_instances DROP CONSTRAINT IF EXISTS factory_instances_template_key_check;
+ALTER TABLE factory_pending_actions DROP CONSTRAINT IF EXISTS factory_pending_actions_template_key_check;
 
 CREATE TABLE IF NOT EXISTS factory_telegram_updates (
   update_id BIGINT PRIMARY KEY,
