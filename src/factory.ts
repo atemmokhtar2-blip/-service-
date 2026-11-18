@@ -15,7 +15,7 @@ const factoryToken = () => process.env.FACTORY_BOT_TOKEN ?? "";
 const channel = () => process.env.REQUIRED_CHANNEL_ID ?? "@K_J6k";
 const channelUrl = () => process.env.REQUIRED_CHANNEL_URL ?? "https://t.me/K_J6k";
 
-const subscriptionPrompt = "🔐 <b>التحقق من صلاحية الدخول</b>\\n\\n<b>أهلاً بك في مصنع البوتات</b>\\nللاستمرار، اشترك في القناة الرسمية أولاً، ثم اضغط «تحقق من الاشتراك».\\n\\n👑 <b>مالك القناة ومشرفوها:</b> دخول مباشر عند تأكيد صلاحياتهم من Telegram.";
+const subscriptionPrompt = "🔐 <b>التحقق من صلاحية الدخول</b>\n\n<b>أهلاً بك في مصنع البوتات</b>\nللاستمرار، اشترك في القناة الرسمية أولاً، ثم اضغط «تحقق من الاشتراك».\n\n👑 <b>مالك القناة ومشرفوها:</b> دخول مباشر عند تأكيد صلاحياتهم من Telegram.";
 
 const subscriptionKeyboard = [[
   { text: "الاشتراك في القناة", url: channelUrl() },
@@ -41,7 +41,7 @@ export async function requireMembership(user: TelegramUser, chatId: number, mess
   return false;
 }
 
-const welcomeText = "~ اهلا بك في اقوى صانع بوتات» .\\n~ اصنع بوتك الان وبخطوة واحدة» .\\n~ فقط ارسل التوكن» .\\n\\nاختر القالب الذي تريد تصنيعه:";
+const welcomeText = "~ اهلا بك في اقوى صانع بوتات» .\n~ اصنع بوتك الان وبخطوة واحدة» .\n~ فقط ارسل التوكن» .\n\nاختر القالب الذي تريد تصنيعه:";
 
 export async function start(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId, messageId))) return;
