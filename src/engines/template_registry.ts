@@ -10,6 +10,7 @@ export type TemplateDefinition = {
   readonly contractVersion: number;
   readonly readiness: ReadinessPolicy;
   readonly requiresPrimaryAdmin: boolean;
+  readonly acceptLegacyResponse: boolean;
 };
 
 const TEMPLATE_KEY = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -35,10 +36,13 @@ function assertDefinition(input: TemplateDefinition): TemplateDefinition {
   if (typeof input.requiresPrimaryAdmin !== "boolean") {
     throw new Error("invalid_primary_admin_policy");
   }
+  if (typeof input.acceptLegacyResponse !== "boolean") {
+    throw new Error("invalid_legacy_response_policy");
+  }
   if (input.readiness?.kind === "http-json") {
     const path = input.readiness.path;
     if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")
-      || path.includes("..") || path.includes("\\\\") || /[?#\\s]/.test(path)) {
+      || path.includes("..") || path.includes("\\") || /[?#\s]/.test(path)) {
       throw new Error("invalid_readiness_path");
     }
     if (!Number.isSafeInteger(input.readiness.timeoutMs)
@@ -78,6 +82,7 @@ const BUILTIN_TEMPLATES: readonly TemplateDefinition[] = [
     contractVersion: 1,
     readiness: { kind: "http-json", path: "/health", timeoutMs: 8000 },
     requiresPrimaryAdmin: true,
+    acceptLegacyResponse: false,
   },
   {
     key: "pre-crime",
@@ -87,6 +92,7 @@ const BUILTIN_TEMPLATES: readonly TemplateDefinition[] = [
     contractVersion: 1,
     readiness: { kind: "provision-only" },
     requiresPrimaryAdmin: false,
+    acceptLegacyResponse: true,
   },
   {
     key: "marayti",
@@ -96,6 +102,7 @@ const BUILTIN_TEMPLATES: readonly TemplateDefinition[] = [
     contractVersion: 1,
     readiness: { kind: "provision-only" },
     requiresPrimaryAdmin: false,
+    acceptLegacyResponse: true,
   },
 ];
 
