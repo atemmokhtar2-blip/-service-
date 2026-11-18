@@ -3,6 +3,7 @@ import { sql } from "./db.js";
 import { decryptToken, encryptToken, signServiceRequest } from "./security.js";
 import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, type TelegramUser } from "./telegram.js";
 import { isFactoryAdmin } from "./subscription.js";
+import { diagnosticCode } from "./diagnostics.js";
 
 export const TEMPLATES = {
   download: { title: "بوت التحميل", description: "تحميل الوسائط من المنصات المدعومة" },
@@ -143,29 +144,62 @@ async function provisionTemplate(template: TemplateKey, payload: { requestId: st
   };
   const url = process.env[envNames[template]];
   if (!url) {
+    console.error(JSON.stringify({ event: "factory_source_provision_config_missing", request_id: payload.requestId, template, env_key: envNames[template] }));
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_ADAPTER_NOT_CONFIGURED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
-  // Integration is deliberately fail-closed until source-side authenticated endpoints are deployed.
+  const startedAt = Date.now();
+  let endpoint: URL;
+  try {
+    endpoint = new URL(url);
+  } catch {
+    console.error(JSON.stringify({ event: "factory_source_provision_bad_url", request_id: payload.requestId, template }));
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_URL_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
   const body = JSON.stringify({ request_id: payload.requestId, owner_telegram_id: payload.ownerId, template, bot_token: payload.token });
   const { signServiceRequest } = await import("./security.js");
-  const path = new URL(url).pathname;
-  const signed = signServiceRequest("POST", path, body);
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature, "idempotency-key": payload.requestId },
-    body,
-    signal: AbortSignal.timeout(15_000),
-  });
+  const path = endpoint.pathname;
+  let response: Response;
+  try {
+    const signed = signServiceRequest("POST", path, body);
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-factory-timestamp": signed.timestamp, "x-factory-signature": signed.signature, "idempotency-key": payload.requestId },
+      body,
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    const failure = error instanceof Error && error.name === "TimeoutError" ? "UPSTREAM_TIMEOUT"
+      : error instanceof TypeError ? "UPSTREAM_NETWORK_ERROR" : "UPSTREAM_REQUEST_ERROR";
+    console.error(JSON.stringify({ event: "factory_source_provision_transport_error", request_id: payload.requestId, template, host: endpoint.host, path, failure, duration_ms: Date.now() - startedAt }));
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code=${failure}, updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
   if (!response.ok) {
+    let upstreamCode = "UNCLASSIFIED";
+    try {
+      const upstream = await response.clone().json() as Record<string, unknown>;
+      upstreamCode = diagnosticCode(upstream.error_code ?? upstream.code ?? upstream.error);
+    } catch { /* Never log raw response bodies. */ }
+    console.error(JSON.stringify({ event: "factory_source_provision_rejected", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, upstream_error_code: upstreamCode, duration_ms: Date.now() - startedAt }));
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_PROVISION_FAILED', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
-  const result = await response.json() as { instance_id?: string; bot_id?: number; bot_username?: string; status?: string };
-  if (!result.instance_id || !["active", "provisioning"].includes(String(result.status))) {
+  let result: { instance_id?: string; bot_id?: number; bot_username?: string; status?: string };
+  try {
+    result = await response.json() as typeof result;
+  } catch {
+    console.error(JSON.stringify({ event: "factory_source_provision_invalid_json", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, duration_ms: Date.now() - startedAt }));
     await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
     return;
   }
+  if (!result.instance_id || !["active", "provisioning"].includes(String(result.status))) {
+    console.error(JSON.stringify({ event: "factory_source_provision_invalid_response", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, response_code: diagnosticCode((result as Record<string, unknown>).error_code ?? (result as Record<string, unknown>).code), has_instance_id: Boolean(result.instance_id), returned_status: diagnosticCode(result.status) }));
+    await sql`UPDATE factory_instances SET status='failed', safe_error_code='SOURCE_RESPONSE_INVALID', updated_at=NOW() WHERE request_id=${payload.requestId}`;
+    return;
+  }
+  console.info(JSON.stringify({ event: "factory_source_provision_accepted", request_id: payload.requestId, template, host: endpoint.host, path, http_status: response.status, source_status: result.status, duration_ms: Date.now() - startedAt }));
   const state = result.status === "active" ? "active" : "provisioning";
   await sql`UPDATE factory_instances SET status=${state}, source_instance_id=${result.instance_id}, bot_id=${result.bot_id ?? null}, bot_username=${result.bot_username ?? null}, safe_error_code=NULL, updated_at=NOW() WHERE request_id=${payload.requestId}`;
 }
