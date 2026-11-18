@@ -4,14 +4,13 @@ import {
   createTemplateRegistry,
   listTemplates,
   TEMPLATE_REGISTRY,
-  type TemplateDefinition,
 } from "../src/engines/template_registry.ts";
 import {
   validateProvisionInput,
   validateProvisionResponse,
 } from "../src/engines/provision_contract.ts";
 
-const definition = (key: string): TemplateDefinition => ({
+const definition = (key) => ({
   key,
   title: `Template ${key}`,
   description: `Description for ${key}`,
@@ -53,7 +52,7 @@ test("adapter result must attest request, bot identity, contract version, and Do
     ownerId: 12345,
     botId: 987654321,
     botUsername: "example_download_bot",
-    template: TEMPLATE_REGISTRY.get("download")!,
+    template: TEMPLATE_REGISTRY.get("download"),
   };
   const valid = {
     contract_version: 1,
