@@ -17,7 +17,7 @@ export async function ensureSchema(): Promise<void> {
     CREATE TABLE IF NOT EXISTS factory_instances (
       id UUID PRIMARY KEY,
       owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id),
-      template_key TEXT NOT NULL CHECK (template_key IN ('download','pre-crime','marayti')),
+      template_key TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('reserved','awaiting_token','provisioning','active','paused','failed')),
       request_id UUID NOT NULL UNIQUE,
       bot_id BIGINT, bot_username TEXT, encrypted_token TEXT,
@@ -33,10 +33,14 @@ export async function ensureSchema(): Promise<void> {
     CREATE TABLE IF NOT EXISTS factory_pending_actions (
       telegram_user_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id),
       action TEXT NOT NULL CHECK (action IN ('awaiting_token')),
-      template_key TEXT NOT NULL CHECK (template_key IN ('download','pre-crime','marayti')),
+      template_key TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // Template keys are validated against the application registry. Keep the
+  // database extensible so registering template #4..#60 does not need a DDL edit.
+  await sql`ALTER TABLE factory_instances DROP CONSTRAINT IF EXISTS factory_instances_template_key_check`;
+  await sql`ALTER TABLE factory_pending_actions DROP CONSTRAINT IF EXISTS factory_pending_actions_template_key_check`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_telegram_updates (
       update_id BIGINT PRIMARY KEY,

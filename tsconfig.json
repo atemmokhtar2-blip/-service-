@@ -8,7 +8,14 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "allowImportingTsExtensions": true
   },
-  "include": ["api/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "api/**/*.ts",
+    "src/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }
