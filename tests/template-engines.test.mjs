@@ -8,6 +8,7 @@ import {
 import {
   validateProvisionInput,
   validateProvisionResponse,
+  validateProvisionStatus,
 } from "../src/engines/provision_contract.ts";
 
 const definition = (key) => ({
@@ -82,4 +83,31 @@ test("adapter result must attest request, bot identity, contract version, and Do
   assert.equal(validateProvisionResponse({
     ...valid, contract_version: undefined,
   }, expected).ok, false);
+});
+
+
+test("status refresh is bound to the same request, bot, and primary owner", () => {
+  const expected = {
+    requestId: "req-123",
+    ownerId: 12345,
+    botId: 987654321,
+    botUsername: "example_download_bot",
+    template: TEMPLATE_REGISTRY.get("download"),
+  };
+  const valid = {
+    contract_version: 1,
+    request_id: "req-123",
+    instance_id: "instance-1",
+    bot_id: 987654321,
+    bot_username: "example_download_bot",
+    status: "active",
+    primary_admin_id: 12345,
+    owner_admin_confirmed: true,
+  };
+  assert.equal(validateProvisionStatus(valid, expected).ok, true);
+  assert.equal(validateProvisionStatus({ ...valid, request_id: "other" }, expected).ok, false);
+  assert.equal(validateProvisionStatus({ ...valid, bot_id: 999 }, expected).ok, false);
+  assert.equal(validateProvisionStatus({ ...valid, primary_admin_id: 999 }, expected).ok, false);
+  assert.equal(validateProvisionStatus({ ...valid, owner_admin_confirmed: false }, expected).ok, false);
+  assert.equal(validateProvisionStatus({ ...valid, status: "reserved" }, expected).ok, false);
 });
