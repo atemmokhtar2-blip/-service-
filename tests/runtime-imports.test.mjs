@@ -6,6 +6,6 @@ test("runtime registry module exists as JavaScript for Vercel's emitted function
   const source = await readFile(new URL("../src/engines/provision_contract.ts", import.meta.url), "utf8");
   const registryModule = new URL("../src/engines/template_registry.js", import.meta.url);
   await assert.doesNotReject(readFile(registryModule));
-  assert.match(source, /from\\s+["']\\.\\/template_registry\\.js["']/);
-  assert.doesNotMatch(source, /from\\s+["']\\.\\/template_registry\\.ts["']/);
+  assert.ok(source.includes('from "./template_registry.js"'));
+  assert.ok(!source.includes('from "./template_registry.ts"'));
 });
