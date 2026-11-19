@@ -4,7 +4,7 @@ import {
   createTemplateRegistry,
   listTemplates,
   TEMPLATE_REGISTRY,
-} from "../src/engines/template_registry.ts";
+} from "../src/engines/template_registry.js";
 import {
   validateProvisionInput,
   validateProvisionResponse,
