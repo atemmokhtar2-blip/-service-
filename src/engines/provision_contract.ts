@@ -1,4 +1,4 @@
-import { getTemplateDefinition, type TemplateDefinition } from "./template_registry.ts";
+import { getTemplateDefinition, type TemplateDefinition } from "./template_registry.js";
 
 export type ValidationResult<T> =
   | { readonly ok: true; readonly value: T }
