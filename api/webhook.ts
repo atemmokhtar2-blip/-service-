@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate } from "../src/db.js";
 import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
-import { retryProvision, showInstance, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
+import { retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -59,7 +59,9 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       const chatId = q.message?.chat?.id;
       if (chatId) {
         await answerCallback(token, q.id);
-        if (q.data === "templates") await showTemplates(q.from, chatId);
+        if (q.data === "templates" || q.data === "create_bot") await showTemplates(q.from, chatId);
+        else if (q.data === "my_bots") await showMyBots(q.from, chatId);
+        else if (q.data === "main_menu") await start(q.from, chatId);
         else if (q.data === "check_subscription") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "cancel_creation") {
           const { sql } = await import("../src/db.js");
