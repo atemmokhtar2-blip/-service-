@@ -68,8 +68,8 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
           await sql`DELETE FROM factory_pending_actions WHERE telegram_user_id=${q.from.id}`;
           await showTemplates(q.from, chatId, q.message?.message_id);
         } else if (q.data?.startsWith("template:")) await showTemplate(q.from, chatId, q.data.slice(9), q.message?.message_id);
-        else if (q.data?.startsWith("instance:")) await showInstance(q.from, chatId, q.data.slice(9));
-        else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6));
+        else if (q.data?.startsWith("instance:")) await showInstance(q.from, chatId, q.data.slice(9), q.message?.message_id);
+        else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6), q.message?.message_id);
       }
     }
     await markUpdateDone(claimedUpdateId);
