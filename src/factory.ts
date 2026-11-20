@@ -27,15 +27,20 @@ export async function requireMembership(user: TelegramUser, chatId: number, mess
     if (await getChannelMembership(factoryToken(), channel(), user.id)) return true;
   } catch { /* A Telegram membership lookup failure must not grant access. */ }
 
-  if (messageId !== undefined) {
+  const saved = messageId === undefined
+    ? await sql`SELECT menu_message_id FROM factory_users WHERE telegram_user_id=${user.id} LIMIT 1`
+    : [];
+  const targetId = messageId ?? (saved[0]?.menu_message_id ? Number(saved[0].menu_message_id) : undefined);
+  if (targetId !== undefined) {
     try {
-      await editMessageText(factoryToken(), chatId, messageId, subscriptionPrompt, subscriptionKeyboard);
+      await editMessageText(factoryToken(), chatId, targetId, subscriptionPrompt, subscriptionKeyboard);
+      await sql`UPDATE factory_users SET menu_message_id=${targetId}, updated_at=NOW() WHERE telegram_user_id=${user.id}`;
     } catch {
-      // Do not send a second copy if Telegram cannot edit the original prompt.
       console.warn("factory_subscription_prompt_edit_failed");
     }
   } else {
-    await sendMessage(factoryToken(), chatId, subscriptionPrompt, subscriptionKeyboard);
+    const sent = await sendMessage(factoryToken(), chatId, subscriptionPrompt, subscriptionKeyboard);
+    await sql`UPDATE factory_users SET menu_message_id=${sent.message_id}, updated_at=NOW() WHERE telegram_user_id=${user.id}`;
   }
   return false;
 }
@@ -380,8 +385,7 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
   let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
   if (!rows.length) {
     const message = "لا توجد نسخة مسجلة من هذا القالب.";
-    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);
-    else await sendMessage(factoryToken(), chatId, message);
+    await renderScreen(user, chatId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]], messageId);
     return;
   }
   if (key === "download" && ["provisioning", "active"].includes(String(rows[0].status))) {
@@ -399,7 +403,7 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
 }
 
 export async function retryProvision(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
-  if (!(await requireMembership(user, chatId))) return;
+  if (!(await requireMembership(user, chatId, messageId))) return;
   if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   const rows = await sql`
