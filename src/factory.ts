@@ -417,7 +417,7 @@ export async function confirmDeleteBot(user: TelegramUser, chatId: number, templ
     return;
   }
   const username = rows[0].bot_username ? ` @${escapeHtml(String(rows[0].bot_username))}` : "";
-  const message = `<b>تأكيد حذف البوت من المصنع</b>\\n\\nهل أنت متأكد إنك عايز تحذف البوت${username} من قائمة بوتاتك؟\\n\\n< i >مهم:</i> الحذف هيشيل تسجيله من المصنع فقط. مش هنلغي التوكن، ومش هنحذف البوت من Telegram أو من الخدمة اللي بتشغّله.`;
+  const message = `<b>تأكيد حذف البوت من المصنع</b>\n\nهل أنت متأكد إنك عايز تحذف البوت${username} من قائمة بوتاتك؟\n\n<i>مهم:</i> الحذف هيشيل تسجيله من المصنع فقط. مش هنلغي التوكن، ومش هنحذف البوت من Telegram أو من الخدمة اللي بتشغّله.`;
   await renderScreen(user, chatId, message, [
     [{ text: "نعم، احذف من المصنع", callback_data: `delete_confirm:${template}`, style: "danger" }],
     [{ text: "إلغاء", callback_data: `delete_cancel:${template}` }],
@@ -437,7 +437,7 @@ export async function deleteBotFromFactory(user: TelegramUser, chatId: number, t
     return;
   }
   await renderScreen(user, chatId,
-    `<b>تم حذف البوت من المصنع</b>\\n\\nتم حذف تسجيل البوت${deleted[0].bot_username ? ` @${escapeHtml(String(deleted[0].bot_username))}` : ""} من حسابك في المصنع فقط.\\n\\nلم يتم إلغاء التوكن أو حذف البوت من Telegram.`,
+    `<b>تم حذف البوت من المصنع</b>\n\nتم حذف تسجيل البوت${deleted[0].bot_username ? ` @${escapeHtml(String(deleted[0].bot_username))}` : ""} من حسابك في المصنع فقط.\n\nلم يتم إلغاء التوكن أو حذف البوت من Telegram.`,
     [[{ text: "عرض بوتاتي", callback_data: "my_bots" }], [{ text: "القائمة الرئيسية", callback_data: "main_menu" }]],
     messageId);
 }
