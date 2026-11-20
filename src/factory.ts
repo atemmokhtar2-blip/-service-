@@ -394,12 +394,52 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
   }
   const row = rows[0];
   const keyboard = [
-    ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
+    ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}`, style: "success" as const }]] : []),
     ...(String(row.status) === "provisioning" ? [[{ text: "تحديث الحالة", callback_data: `instance:${template}` }]] : []),
-    [{ text: "القوالب", callback_data: "templates" }],
+    [{ text: "🗑 حذف البوت من المصنع", callback_data: `delete_bot:${template}`, style: "danger" as const }],
+    [{ text: "العودة إلى بوتاتي", callback_data: "my_bots" }],
   ];
   const message = `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`;
   await renderScreen(user, chatId, message, keyboard, messageId);
+}
+
+export async function confirmDeleteBot(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
+  if (!(await requireMembership(user, chatId, messageId))) return;
+  if (!getTemplateDefinition(template)) return;
+  const rows = await sql`
+    SELECT bot_username, status
+    FROM factory_instances
+    WHERE owner_telegram_id=${user.id} AND template_key=${template}
+    LIMIT 1
+  `;
+  if (!rows.length) {
+    await renderScreen(user, chatId, "البوت ده مش موجود في قائمة بوتاتك.", [[{ text: "العودة إلى بوتاتي", callback_data: "my_bots" }]], messageId);
+    return;
+  }
+  const username = rows[0].bot_username ? ` @${escapeHtml(String(rows[0].bot_username))}` : "";
+  const message = `<b>تأكيد حذف البوت من المصنع</b>\\n\\nهل أنت متأكد إنك عايز تحذف البوت${username} من قائمة بوتاتك؟\\n\\n< i >مهم:</i> الحذف هيشيل تسجيله من المصنع فقط. مش هنلغي التوكن، ومش هنحذف البوت من Telegram أو من الخدمة اللي بتشغّله.`;
+  await renderScreen(user, chatId, message, [
+    [{ text: "نعم، احذف من المصنع", callback_data: `delete_confirm:${template}`, style: "danger" }],
+    [{ text: "إلغاء", callback_data: `delete_cancel:${template}` }],
+  ], messageId);
+}
+
+export async function deleteBotFromFactory(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
+  if (!(await requireMembership(user, chatId, messageId))) return;
+  if (!getTemplateDefinition(template)) return;
+  const deleted = await sql`
+    DELETE FROM factory_instances
+    WHERE owner_telegram_id=${user.id} AND template_key=${template}
+    RETURNING bot_username
+  `;
+  if (!deleted.length) {
+    await renderScreen(user, chatId, "البوت مش موجود في المصنع أو تم حذفه بالفعل.", [[{ text: "العودة إلى بوتاتي", callback_data: "my_bots" }]], messageId);
+    return;
+  }
+  await renderScreen(user, chatId,
+    `<b>تم حذف البوت من المصنع</b>\\n\\nتم حذف تسجيل البوت${deleted[0].bot_username ? ` @${escapeHtml(String(deleted[0].bot_username))}` : ""} من حسابك في المصنع فقط.\\n\\nلم يتم إلغاء التوكن أو حذف البوت من Telegram.`,
+    [[{ text: "عرض بوتاتي", callback_data: "my_bots" }], [{ text: "القائمة الرئيسية", callback_data: "main_menu" }]],
+    messageId);
 }
 
 export async function retryProvision(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
