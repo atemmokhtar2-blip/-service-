@@ -61,7 +61,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
         await answerCallback(token, q.id);
         if (q.data === "templates" || q.data === "create_bot") await showTemplates(q.from, chatId, q.message?.message_id);
         else if (q.data === "my_bots") await showMyBots(q.from, chatId, q.message?.message_id);
-        else if (q.data === "main_menu") await start(q.from, chatId);
+        else if (q.data === "main_menu") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "check_subscription") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "cancel_creation") {
           const { sql } = await import("../src/db.js");
