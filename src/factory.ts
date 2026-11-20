@@ -398,7 +398,12 @@ export async function retryProvision(user: TelegramUser, chatId: number, templat
     WHERE owner_telegram_id=${user.id} AND template_key=${key}
     LIMIT 1
   `;
-  if (!rows.length) {\n    const message = "لا توجد نسخة لإعادة تصنيعها.";\n    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);\n    else await sendMessage(factoryToken(), chatId, message);\n    return;\n  }
+  if (!rows.length) {
+    const message = "لا توجد نسخة لإعادة تصنيعها.";
+    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);
+    else await sendMessage(factoryToken(), chatId, message);
+    return;
+  }
   const row = rows[0];
   if (String(row.status) !== "failed") return showInstance(user, chatId, key, messageId);
   try {
