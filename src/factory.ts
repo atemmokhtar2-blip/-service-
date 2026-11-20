@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "./db.js";
 import { decryptToken, encryptToken, signServiceRequest } from "./security.js";
-import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, type TelegramUser } from "./telegram.js";
+import { getBotIdentity, getChannelMembership, sendMessage, editMessageText, type InlineButton, type TelegramUser } from "./telegram.js";
 import { isFactoryAdmin } from "./subscription.js";
 import { diagnosticCode } from "./diagnostics.js";
 import { getTemplateDefinition, templateMenuRecord } from "./engines/template_registry.js";
@@ -48,6 +48,25 @@ const mainMenuKeyboard = [
   ],
 ];
 
+async function renderScreen(user: TelegramUser, chatId: number, text: string, keyboard: InlineButton[][], messageId?: number): Promise<void> {
+  const saved = messageId === undefined
+    ? await sql`SELECT menu_message_id FROM factory_users WHERE telegram_user_id=${user.id} LIMIT 1`
+    : [];
+  const targetId = messageId ?? (saved[0]?.menu_message_id ? Number(saved[0].menu_message_id) : undefined);
+  if (targetId !== undefined) {
+    try {
+      await editMessageText(factoryToken(), chatId, targetId, text, keyboard);
+      await sql`UPDATE factory_users SET menu_message_id=${targetId}, updated_at=NOW() WHERE telegram_user_id=${user.id}`;
+      return;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("message is not modified")) return;
+      console.warn("factory_screen_edit_failed", { userId: user.id, messageId: targetId });
+    }
+  }
+  const sent = await sendMessage(factoryToken(), chatId, text, keyboard);
+  await sql`UPDATE factory_users SET menu_message_id=${sent.message_id}, updated_at=NOW() WHERE telegram_user_id=${user.id}`;
+}
+
 export async function start(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId, messageId))) return;
   await sql`
@@ -55,11 +74,7 @@ export async function start(user: TelegramUser, chatId: number, messageId?: numb
     VALUES (${user.id}, ${user.username ?? null}, ${user.first_name ?? null})
     ON CONFLICT(telegram_user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name, updated_at=NOW()
   `;
-  if (messageId !== undefined) {
-    await editMessageText(factoryToken(), chatId, messageId, welcomeText, mainMenuKeyboard);
-  } else {
-    await sendMessage(factoryToken(), chatId, welcomeText, mainMenuKeyboard);
-  }
+  await renderScreen(user, chatId, welcomeText, mainMenuKeyboard, messageId);
 }
 
 function templateKeyboard() {
@@ -86,12 +101,11 @@ export async function showMyBots(user: TelegramUser, chatId: number, messageId?:
     const key = String(row.template_key);
     const title = TEMPLATES[key]?.title ?? key;
     return `• <b>${escapeHtml(title)}</b> — ${statusArabic(String(row.status))}${row.bot_username ? ` — @${escapeHtml(String(row.bot_username))}` : ""}`;
-  }).join("\\n");
+  }).join("\n");
   const message = rows.length
-    ? `<b>بوتاتك المسجلة</b>\\n\\n${summary}\\n\\nاختار أي بوت لعرض تفاصيله:`
+    ? `<b>بوتاتك المسجلة</b>\n\n${summary}\n\\nاختار أي بوت لعرض تفاصيله:`
     : "لسه معملتش أي بوت. اضغط «إنشاء بوت جديد» عشان تختار القالب وتبدأ.";
-  if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
-  else await sendMessage(factoryToken(), chatId, message, keyboard);
+  await renderScreen(user, chatId, message, keyboard, messageId);
 }
 
 export async function showTemplate(user: TelegramUser, chatId: number, key: string, messageId?: number): Promise<void> {
@@ -107,8 +121,7 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
       [{ text: "العودة للقوالب", callback_data: "templates" }],
       [{ text: "القائمة الرئيسية", callback_data: "main_menu" }],
     ];
-    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
-    else await sendMessage(factoryToken(), chatId, message, keyboard);
+    await renderScreen(user, chatId, message, keyboard, messageId);
     return;
   }
   await sql`
@@ -119,8 +132,7 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
   const description = TEMPLATES[template].description;
   const message = `<b>${escapeHtml(TEMPLATES[template].title)}</b>\\n\\n${escapeHtml(description)}\\n\\n(ابعت التوكن للتفعيل)`;
   const keyboard = [[{ text: "إلغاء", callback_data: "cancel_creation" }], [{ text: "العودة للقوالب", callback_data: "templates" }]];
-  if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
-  else await sendMessage(factoryToken(), chatId, message, keyboard);
+  await renderScreen(user, chatId, message, keyboard, messageId);
 }
 
 export async function showTemplates(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
@@ -130,8 +142,7 @@ export async function showTemplates(user: TelegramUser, chatId: number, messageI
     ...Object.entries(TEMPLATES).map(([key, item]) => [{ text: item.title, callback_data: `template:${key}` }]),
     [{ text: "القائمة الرئيسية", callback_data: "main_menu" }],
   ];
-  if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
-  else await sendMessage(factoryToken(), chatId, message, keyboard);
+  await renderScreen(user, chatId, message, keyboard, messageId);
 }
 
 export async function submitToken(user: TelegramUser, chatId: number, rawToken: string): Promise<void> {
@@ -384,8 +395,7 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
     [{ text: "القوالب", callback_data: "templates" }],
   ];
   const message = `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`;
-  if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
-  else await sendMessage(factoryToken(), chatId, message, keyboard);
+  await renderScreen(user, chatId, message, keyboard, messageId);
 }
 
 export async function retryProvision(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
