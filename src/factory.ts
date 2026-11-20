@@ -374,7 +374,7 @@ async function refreshDownloadStatus(requestId: string): Promise<void> {
 }
 
 export async function showInstance(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
-  if (!(await requireMembership(user, chatId))) return;
+  if (!(await requireMembership(user, chatId, messageId))) return;
   if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
@@ -427,7 +427,7 @@ export async function retryProvision(user: TelegramUser, chatId: number, templat
     const code = safeCode(error);
     await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE owner_telegram_id=${user.id} AND template_key=${key}`;
   }
-  await showInstance(user, chatId, key);
+  await showInstance(user, chatId, key, messageId);
 }
 
 function statusArabic(status: string): string {
