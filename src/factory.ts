@@ -135,7 +135,7 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
     ON CONFLICT(telegram_user_id) DO UPDATE SET action='awaiting_token', template_key=EXCLUDED.template_key, created_at=NOW()
   `;
   const description = TEMPLATES[template].description;
-  const message = `<b>${escapeHtml(TEMPLATES[template].title)}</b>\n\n${escapeHtml(description)}\n\n(ابعت التوكن للتفعيل)`;
+  const message = `<b>${escapeHtml(TEMPLATES[template].title)}</b>\n\n${escapeHtml(description)}\n\nابعت التوكن للتفعيل`;
   const keyboard = [[{ text: "إلغاء", callback_data: "cancel_creation" }], [{ text: "العودة للقوالب", callback_data: "templates" }]];
   await renderScreen(user, chatId, message, keyboard, messageId);
 }
@@ -417,7 +417,7 @@ export async function confirmDeleteBot(user: TelegramUser, chatId: number, templ
     return;
   }
   const username = rows[0].bot_username ? ` @${escapeHtml(String(rows[0].bot_username))}` : "";
-  const message = `<b>تأكيد حذف البوت من المصنع</b>\n\nهل أنت متأكد إنك عايز تحذف البوت${username} من قائمة بوتاتك؟\n\n<i>مهم:</i> الحذف هيشيل تسجيله من المصنع فقط. مش هنلغي التوكن، ومش هنحذف البوت من Telegram أو من الخدمة اللي بتشغّله.`;
+  const message = `<b>تأكيد حذف البوت من المصنع</b>\n\nهل أنت متأكد إنك عايز تحذف البوت${username} من قائمة بوتاتك؟`;
   await renderScreen(user, chatId, message, [
     [{ text: "نعم، احذف من المصنع", callback_data: `delete_confirm:${template}`, style: "danger" }],
     [{ text: "إلغاء", callback_data: `delete_cancel:${template}` }],
