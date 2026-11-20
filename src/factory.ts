@@ -286,20 +286,7 @@ async function provisionTemplate(
   await sql`UPDATE factory_instances SET status=${state}, source_instance_id=${result.instanceId}, bot_id=${result.botId}, bot_username=${result.botUsername ?? null}, safe_error_code=NULL, updated_at=NOW() WHERE request_id=${payload.requestId}`;
 }
 
-export async function showTemplates(user: TelegramUser, chatId: number): Promise<void> {
-  if (!(await requireMembership(user, chatId))) return;
-  const descriptions: Record<string, string> = {
-    marayti: "<b>بوت مرايتي</b>\\nبوت الصراحة والرسائل المجهولة؛ يقدر الناس يبعتولك رسائلهم من غير ما تظهر هويتهم.",
-    download: "<b>بوت التحميل</b>\\nحمّل الوسائط من المنصات المدعومة مباشرة من تيليجرام.",
-    "pre-crime": "<b>بوت الحماية</b>\\nأدوات لإدارة مجموعات تيليجرام وحمايتها.",
-  };
-  const details = Object.keys(TEMPLATES)
-    .map((key) => descriptions[key] ?? `<b>${escapeHtml(TEMPLATES[key].title)}</b>`)
-    .join("\\n\\n");
-  await sendMessage(factoryToken(), chatId,
-    `<b>اختار البوت اللي حابب تنشئه</b>\\n\\n${details}\\n\\nاضغط على اسم القالب للمتابعة:`,
-    [...templateKeyboard(), [{ text: "القائمة الرئيسية", callback_data: "main_menu" }]]);
-}
+
 
 async function refreshDownloadStatus(requestId: string): Promise<void> {
   const base = process.env.DOWNLOAD_PROVISION_URL;
