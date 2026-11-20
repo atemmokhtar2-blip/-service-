@@ -367,7 +367,12 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
   if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
-  if (!rows.length) {\n    const message = "لا توجد نسخة مسجلة من هذا القالب.";\n    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);\n    else await sendMessage(factoryToken(), chatId, message);\n    return;\n  }
+  if (!rows.length) {
+    const message = "لا توجد نسخة مسجلة من هذا القالب.";
+    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);
+    else await sendMessage(factoryToken(), chatId, message);
+    return;
+  }
   if (key === "download" && ["provisioning", "active"].includes(String(rows[0].status))) {
     await refreshDownloadStatus(String(rows[0].request_id));
     rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
