@@ -362,12 +362,12 @@ async function refreshDownloadStatus(requestId: string): Promise<void> {
   }
 }
 
-export async function showInstance(user: TelegramUser, chatId: number, template: string): Promise<void> {
+export async function showInstance(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
   if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
   let rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
-  if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة مسجلة من هذا القالب.");
+  if (!rows.length) {\n    const message = "لا توجد نسخة مسجلة من هذا القالب.";\n    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);\n    else await sendMessage(factoryToken(), chatId, message);\n    return;\n  }
   if (key === "download" && ["provisioning", "active"].includes(String(rows[0].status))) {
     await refreshDownloadStatus(String(rows[0].request_id));
     rows = await sql`SELECT request_id, status, bot_username, safe_error_code FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${key} LIMIT 1`;
@@ -378,12 +378,12 @@ export async function showInstance(user: TelegramUser, chatId: number, template:
     ...(String(row.status) === "provisioning" ? [[{ text: "تحديث الحالة", callback_data: `instance:${template}` }]] : []),
     [{ text: "القوالب", callback_data: "templates" }],
   ];
-  await sendMessage(factoryToken(), chatId,
-    `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`,
-    keyboard);
+  const message = `القالب: ${TEMPLATES[template as TemplateKey]?.title ?? template}\nالحالة: ${statusArabic(String(row.status))}\nالبوت: ${row.bot_username ? "@" + escapeHtml(String(row.bot_username)) : "لم يتم تفعيله بعد"}${row.safe_error_code ? "\nرمز الحالة: " + escapeHtml(String(row.safe_error_code)) : ""}`;
+  if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, keyboard);
+  else await sendMessage(factoryToken(), chatId, message, keyboard);
 }
 
-export async function retryProvision(user: TelegramUser, chatId: number, template: string): Promise<void> {
+export async function retryProvision(user: TelegramUser, chatId: number, template: string, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId))) return;
   if (!getTemplateDefinition(template)) return;
   const key = template as TemplateKey;
@@ -395,7 +395,7 @@ export async function retryProvision(user: TelegramUser, chatId: number, templat
   `;
   if (!rows.length) return sendMessage(factoryToken(), chatId, "لا توجد نسخة لإعادة تصنيعها.");
   const row = rows[0];
-  if (String(row.status) !== "failed") return showInstance(user, chatId, key);
+  if (String(row.status) !== "failed") return showInstance(user, chatId, key, messageId);
   try {
     const token = decryptToken(String(row.encrypted_token));
     const identity = await getBotIdentity(token);
