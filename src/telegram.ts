@@ -14,7 +14,7 @@ async function call<T>(token: string, method: string, payload: Record<string, un
     signal: AbortSignal.timeout(12_000),
   });
   const json = await response.json() as { ok: boolean; result?: T; description?: string };
-  if (!response.ok || !json.ok) throw new Error(`telegram_${method}_failed_${response.status}`);
+  if (!response.ok || !json.ok) throw new Error(`telegram_${method}_failed_${response.status}:${json.description ?? "unknown"}`);
   return json.result as T;
 }
 
