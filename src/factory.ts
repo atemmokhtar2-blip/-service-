@@ -40,7 +40,13 @@ export async function requireMembership(user: TelegramUser, chatId: number, mess
   return false;
 }
 
-const welcomeText = "~ اهلا بك في اقوى صانع بوتات» .\n~ اصنع بوتك الان وبخطوة واحدة» .\n~ فقط ارسل التوكن» .\n\nاختر القالب الذي تريد تصنيعه:";
+const welcomeText = "<b>أهلاً بك في مصنع البوتات</b>\n\nمن هنا تقدر تنشئ بوتك الخاص أو تستعرض كل البوتات اللي أنشأتها.";
+const mainMenuKeyboard = [
+  [
+    { text: "🤖 إنشاء بوت جديد", callback_data: "create_bot" },
+    { text: "📋 بوتاتي", callback_data: "my_bots" },
+  ],
+];
 
 export async function start(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId, messageId))) return;
@@ -50,14 +56,43 @@ export async function start(user: TelegramUser, chatId: number, messageId?: numb
     ON CONFLICT(telegram_user_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name, updated_at=NOW()
   `;
   if (messageId !== undefined) {
-    await editMessageText(factoryToken(), chatId, messageId, welcomeText, templateKeyboard(user.id));
+    await editMessageText(factoryToken(), chatId, messageId, welcomeText, mainMenuKeyboard);
   } else {
-    await sendMessage(factoryToken(), chatId, welcomeText, templateKeyboard(user.id));
+    await sendMessage(factoryToken(), chatId, welcomeText, mainMenuKeyboard);
   }
 }
 
-function templateKeyboard(userId: number) {
+function templateKeyboard() {
   return Object.entries(TEMPLATES).map(([key, item]) => [{ text: item.title, callback_data: `template:${key}` }]);
+}
+
+export async function showMyBots(user: TelegramUser, chatId: number): Promise<void> {
+  if (!(await requireMembership(user, chatId))) return;
+  const rows = await sql`
+    SELECT template_key, status, bot_username
+    FROM factory_instances
+    WHERE owner_telegram_id=${user.id}
+    ORDER BY created_at DESC
+  `;
+  if (!rows.length) {
+    await sendMessage(factoryToken(), chatId,
+      "لسه معملتش أي بوت. اضغط «إنشاء بوت جديد» عشان تختار القالب وتبدأ.",
+      [[{ text: "إنشاء بوت جديد", callback_data: "create_bot" }], [{ text: "القائمة الرئيسية", callback_data: "main_menu" }]]);
+    return;
+  }
+  const keyboard = rows.map((row) => {
+    const key = String(row.template_key);
+    const title = TEMPLATES[key]?.title ?? key;
+    const username = row.bot_username ? ` @${String(row.bot_username)}` : "";
+    return [{ text: `${title} · ${statusArabic(String(row.status))}${username}`.slice(0, 64), callback_data: `instance:${key}` }];
+  });
+  keyboard.push([{ text: "القائمة الرئيسية", callback_data: "main_menu" }]);
+  const summary = rows.map((row) => {
+    const key = String(row.template_key);
+    const title = TEMPLATES[key]?.title ?? key;
+    return `• <b>${escapeHtml(title)}</b> — ${statusArabic(String(row.status))}${row.bot_username ? ` — @${escapeHtml(String(row.bot_username))}` : ""}`;
+  }).join("\\n");
+  await sendMessage(factoryToken(), chatId, `<b>بوتاتك المسجلة</b>\\n\\n${summary}\\n\\nاختار أي بوت لعرض تفاصيله:`, keyboard);
 }
 
 export async function showTemplate(user: TelegramUser, chatId: number, key: string): Promise<void> {
