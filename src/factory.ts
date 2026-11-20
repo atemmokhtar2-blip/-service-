@@ -108,7 +108,7 @@ export async function showMyBots(user: TelegramUser, chatId: number, messageId?:
     return `• <b>${escapeHtml(title)}</b> — ${statusArabic(String(row.status))}${row.bot_username ? ` — @${escapeHtml(String(row.bot_username))}` : ""}`;
   }).join("\n");
   const message = rows.length
-    ? `<b>بوتاتك المسجلة</b>\n\n${summary}\n\\nاختار أي بوت لعرض تفاصيله:`
+    ? `<b>بوتاتك المسجلة</b>\n\n${summary}\n\nاختار أي بوت لعرض تفاصيله:`
     : "لسه معملتش أي بوت. اضغط «إنشاء بوت جديد» عشان تختار القالب وتبدأ.";
   await renderScreen(user, chatId, message, keyboard, messageId);
 }
@@ -120,7 +120,7 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
   const existing = await sql`SELECT status, bot_username FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${template} LIMIT 1`;
   if (existing.length) {
     const row = existing[0];
-    const message = `لديك بالفعل نسخة من قالب ${TEMPLATES[template].title}.\\nالحالة: ${statusArabic(String(row.status))}${row.bot_username ? `\\nالبوت: @${escapeHtml(String(row.bot_username))}` : ""}\\nلا يمكن إنشاء نسخة ثانية من نفس القالب.`;
+    const message = `لديك بالفعل نسخة من قالب ${TEMPLATES[template].title}.\nالحالة: ${statusArabic(String(row.status))}${row.bot_username ? `\nالبوت: @${escapeHtml(String(row.bot_username))}` : ""}\nلا يمكن إنشاء نسخة ثانية من نفس القالب.`;
     const keyboard = [
       ...(String(row.status) === "failed" ? [[{ text: "إعادة محاولة التصنيع", callback_data: `retry:${template}` }]] : []),
       [{ text: "العودة للقوالب", callback_data: "templates" }],
@@ -135,14 +135,14 @@ export async function showTemplate(user: TelegramUser, chatId: number, key: stri
     ON CONFLICT(telegram_user_id) DO UPDATE SET action='awaiting_token', template_key=EXCLUDED.template_key, created_at=NOW()
   `;
   const description = TEMPLATES[template].description;
-  const message = `<b>${escapeHtml(TEMPLATES[template].title)}</b>\\n\\n${escapeHtml(description)}\\n\\n(ابعت التوكن للتفعيل)`;
+  const message = `<b>${escapeHtml(TEMPLATES[template].title)}</b>\n\n${escapeHtml(description)}\n\n(ابعت التوكن للتفعيل)`;
   const keyboard = [[{ text: "إلغاء", callback_data: "cancel_creation" }], [{ text: "العودة للقوالب", callback_data: "templates" }]];
   await renderScreen(user, chatId, message, keyboard, messageId);
 }
 
 export async function showTemplates(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
   if (!(await requireMembership(user, chatId, messageId))) return;
-  const message = "<b>اختار البوت اللي حابب تنشئه</b>\\n\\nاضغط على اسم البوت لعرض وصفه وبدء التفعيل.";
+  const message = "<b>اختار البوت اللي حابب تنشئه</b>\n\nاضغط على اسم البوت لعرض وصفه وبدء التفعيل.";
   const keyboard = [
     ...Object.entries(TEMPLATES).map(([key, item]) => [{ text: item.title, callback_data: `template:${key}` }]),
     [{ text: "القائمة الرئيسية", callback_data: "main_menu" }],
