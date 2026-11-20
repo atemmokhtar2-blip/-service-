@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate } from "../src/db.js";
 import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
-import { retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
+import { confirmDeleteBot, deleteBotFromFactory, retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -70,6 +70,9 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
         } else if (q.data?.startsWith("template:")) await showTemplate(q.from, chatId, q.data.slice(9), q.message?.message_id);
         else if (q.data?.startsWith("instance:")) await showInstance(q.from, chatId, q.data.slice(9), q.message?.message_id);
         else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6), q.message?.message_id);
+        else if (q.data?.startsWith("delete_bot:")) await confirmDeleteBot(q.from, chatId, q.data.slice(11), q.message?.message_id);
+        else if (q.data?.startsWith("delete_confirm:")) await deleteBotFromFactory(q.from, chatId, q.data.slice(15), q.message?.message_id);
+        else if (q.data?.startsWith("delete_cancel:")) await showInstance(q.from, chatId, q.data.slice(14), q.message?.message_id);
       }
     }
     await markUpdateDone(claimedUpdateId);
