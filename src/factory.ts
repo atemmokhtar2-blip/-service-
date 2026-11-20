@@ -45,7 +45,7 @@ export async function requireMembership(user: TelegramUser, chatId: number, mess
   return false;
 }
 
-const welcomeText = "<b>أهلاً بك في مصنع البوتات</b>\n\nمن هنا تقدر تنشئ بوتك الخاص أو تستعرض كل البوتات اللي أنشأتها.";
+const welcomeText = "~ اهلا بك في اقوى صانع بوتات .\n~ اصنع بوتك الان وبخطوة واحدة .\n~ فقط ارسل التوكن ♡ .";
 const mainMenuKeyboard = [
   [
     { text: "🤖 إنشاء بوت جديد", callback_data: "create_bot" },
