@@ -13,6 +13,7 @@ export async function ensureSchema(): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`ALTER TABLE factory_users ADD COLUMN IF NOT EXISTS menu_message_id BIGINT`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_instances (
       id UUID PRIMARY KEY,
