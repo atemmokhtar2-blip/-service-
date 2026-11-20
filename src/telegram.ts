@@ -3,7 +3,8 @@ import { isAllowedChannelMember } from "./subscription.js";
 const API = "https://api.telegram.org";
 
 export type TelegramUser = { id: number; username?: string; first_name?: string; is_bot?: boolean };
-export type InlineButton = { text: string; callback_data?: string; url?: string };\nexport type TelegramMessage = { message_id: number };
+export type InlineButton = { text: string; callback_data?: string; url?: string };
+export type TelegramMessage = { message_id: number };
 
 async function call<T>(token: string, method: string, payload: Record<string, unknown>): Promise<T> {
   const response = await fetch(`${API}/bot${token}/${method}`, {
@@ -26,8 +27,8 @@ export async function getChannelMembership(token: string, channel: string, userI
   return isAllowedChannelMember(member);
 }
 
-export async function sendMessage(token: string, chatId: number, text: string, keyboard?: InlineButton[][]): Promise<void> {
-  await call(token, "sendMessage", {
+export async function sendMessage(token: string, chatId: number, text: string, keyboard?: InlineButton[][]): Promise<TelegramMessage> {
+  return call<TelegramMessage>(token, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
