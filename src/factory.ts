@@ -157,7 +157,7 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
   const template = String(pending[0].template_key) as TemplateKey;
   const input = validateProvisionInput({ ownerId: user.id, templateKey: template, token: rawToken });
   if (!input.ok) {
-    await sendMessage(factoryToken(), chatId, "تعذّر التحقق من بيانات التصنيع. تأكد من اختيار قالب مسجل وإرسال توكن صحيح.");
+    await renderScreen(user, chatId, "تعذّر التحقق من بيانات التصنيع. تأكد من اختيار قالب مسجل وإرسال توكن صحيح.", [[{ text: "إلغاء", callback_data: "cancel_creation" }]]);
     return;
   }
   const token = input.value.token;
@@ -165,11 +165,11 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
   let identity: TelegramUser;
   try { identity = await getBotIdentity(token); }
   catch {
-    await sendMessage(factoryToken(), chatId, "التوكن غير صالح أو تعذر الوصول إلى Telegram. راجع التوكن وحاول مرة أخرى.");
+    await renderScreen(user, chatId, "التوكن غير صالح أو تعذر الوصول إلى Telegram. راجع التوكن وحاول مرة أخرى.", [[{ text: "إلغاء", callback_data: "cancel_creation" }]]);
     return;
   }
   if (!identity.is_bot) {
-    await sendMessage(factoryToken(), chatId, "التوكن لا يعود إلى بوت صالح. أرسل توكن بوت من BotFather.");
+    await renderScreen(user, chatId, "التوكن لا يعود إلى بوت صالح. أرسل توكن بوت من BotFather.", [[{ text: "إلغاء", callback_data: "cancel_creation" }]]);
     return;
   }
 
@@ -184,11 +184,11 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
       RETURNING id
     `;
     if (!inserted.length) {
-      await sendMessage(factoryToken(), chatId, "لديك بالفعل نسخة محجوزة أو منشأة من هذا القالب. لن يتم إنشاء نسخة مكررة.");
+      await renderScreen(user, chatId, "لديك بالفعل نسخة محجوزة أو منشأة من هذا القالب. لن يتم إنشاء نسخة مكررة.", [[{ text: "بوتاتي", callback_data: "my_bots" }]]);
       return;
     }
     await sql`DELETE FROM factory_pending_actions WHERE telegram_user_id=${user.id}`;
-    await sendMessage(factoryToken(), chatId,
+    await renderScreen(user, chatId,
       `تم التحقق من التوكن بنجاح للبوت @${escapeHtml(identity.username ?? "بدون اسم")}.\n\nحُجز طلب التصنيع بأمان. جارٍ تجهيز الربط مع محرك القالب؛ لن نعلن نجاح التشغيل قبل تأكيد الخدمة الأصلية.`,
       [[{ text: "حالة النسخة", callback_data: `instance:${template}` }, { text: "القوالب", callback_data: "templates" }]]);
     await provisionTemplate(template, { requestId, ownerId: user.id, token, identity });
@@ -196,7 +196,7 @@ export async function submitToken(user: TelegramUser, chatId: number, rawToken: 
   } catch (error) {
     const code = safeCode(error);
     await sql`UPDATE factory_instances SET status='failed', safe_error_code=${code}, updated_at=NOW() WHERE request_id=${requestId}`;
-    await sendMessage(factoryToken(), chatId, "تعذر إكمال حجز النسخة بسبب خطأ داخلي آمن. احتفظنا برمز الخطأ: " + code);
+    await renderScreen(user, chatId, "تعذر إكمال حجز النسخة بسبب خطأ داخلي آمن. احتفظنا برمز الخطأ: " + code, [[{ text: "بوتاتي", callback_data: "my_bots" }]]);
   }
 }
 
@@ -414,8 +414,7 @@ export async function retryProvision(user: TelegramUser, chatId: number, templat
   `;
   if (!rows.length) {
     const message = "لا توجد نسخة لإعادة تصنيعها.";
-    if (messageId !== undefined) await editMessageText(factoryToken(), chatId, messageId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]]);
-    else await sendMessage(factoryToken(), chatId, message);
+    await renderScreen(user, chatId, message, [[{ text: "العودة لبوتاتي", callback_data: "my_bots" }]], messageId);
     return;
   }
   const row = rows[0];
