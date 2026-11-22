@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate } from "../src/db.js";
+import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate, sql } from "../src/db.js";
 import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
 import { confirmDeleteBot, deleteBotFromFactory, retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
+import { cancelEditRequest, captureEditText, confirmEditRequest, ensureEditSchema, handleAdminEditAction, hasEditDraft, showEditPurchaseInfo, showManagedInstance, startEditRequest } from "../src/edits.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -18,6 +19,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
   if (!secret || req.headers["x-telegram-bot-api-secret-token"] !== secret) { res.statusCode = 401; res.end("Unauthorized"); return; }
   try {
     await ensureSchema();
+    await ensureEditSchema();
     const update = req.body ?? await readBody(req);
     if (!Number.isSafeInteger(update.update_id)) {
       res.statusCode = 400; res.end("Invalid update"); return;
@@ -35,22 +37,28 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       if (update.message.text === "/start") await start(user, chatId);
       else if (update.message.text === "/templates") await showTemplates(user, chatId);
       else if (update.message.text && !update.message.text.startsWith("/")) {
-        const { sql } = await import("../src/db.js");
-        const pending = await sql`SELECT 1 FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
-        if (!pending.length) {
-          await sendMessage(token, chatId, "اختار القالب الأول من القائمة، وبعدها ابعت توكن البوت.");
+        if (await hasEditDraft(user.id)) {
+          await captureEditText(user, chatId, update.message.text);
         } else {
-          // Remove the submitted credential from chat history before using it.
-          try {
-            await deleteMessage(token, chatId, update.message.message_id);
-          } catch {
-            console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
-            await sendMessage(token, chatId,
-              "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
-            await markUpdateDone(claimedUpdateId);
-            res.statusCode = 200; res.end("OK"); return;
+          const pending = await sql`SELECT template_key FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
+          if (!pending.length) {
+            await sendMessage(token, chatId, "اختار القالب الأول من القائمة، وبعدها ابعت توكن البوت.");
+          } else {
+            try {
+              await deleteMessage(token, chatId, update.message.message_id);
+            } catch {
+              console.warn("factory_token_message_delete_failed", { updateId: update.update_id });
+              await sendMessage(token, chatId,
+                "تعذر حذف رسالة التوكن تلقائيًا، لذلك لم نستخدم التوكن. احذف الرسالة يدويًا، وأصدر توكنًا جديدًا من BotFather ثم أعد المحاولة.");
+              await markUpdateDone(claimedUpdateId);
+              res.statusCode = 200; res.end("OK"); return;
+            }
+            const templateKey = String(pending[0].template_key);
+            await submitToken(user, chatId, update.message.text);
+            const saved = await sql`SELECT menu_message_id FROM factory_users WHERE telegram_user_id=${user.id} LIMIT 1`;
+            const instance = await sql`SELECT id FROM factory_instances WHERE owner_telegram_id=${user.id} AND template_key=${templateKey} LIMIT 1`;
+            if (instance.length) await showManagedInstance(user, chatId, templateKey, saved[0]?.menu_message_id ? Number(saved[0].menu_message_id) : undefined);
           }
-          await submitToken(user, chatId, update.message.text);
         }
       }
     }
@@ -64,21 +72,34 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
         else if (q.data === "main_menu") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "check_subscription") await start(q.from, chatId, q.message?.message_id);
         else if (q.data === "cancel_creation") {
-          const { sql } = await import("../src/db.js");
           await sql`DELETE FROM factory_pending_actions WHERE telegram_user_id=${q.from.id}`;
           await showTemplates(q.from, chatId, q.message?.message_id);
         } else if (q.data?.startsWith("template:")) await showTemplate(q.from, chatId, q.data.slice(9), q.message?.message_id);
-        else if (q.data?.startsWith("instance:")) await showInstance(q.from, chatId, q.data.slice(9), q.message?.message_id);
-        else if (q.data?.startsWith("retry:")) await retryProvision(q.from, chatId, q.data.slice(6), q.message?.message_id);
+        else if (q.data?.startsWith("instance:")) await showManagedInstance(q.from, chatId, q.data.slice(9), q.message?.message_id);
+        else if (q.data?.startsWith("retry:")) {
+          const key = q.data.slice(6);
+          await retryProvision(q.from, chatId, key, q.message?.message_id);
+          await showManagedInstance(q.from, chatId, key, q.message?.message_id);
+        }
+        else if (q.data?.startsWith("edit_start:")) await startEditRequest(q.from, chatId, q.data.slice(11));
+        else if (q.data === "edit_confirm") await confirmEditRequest(q.from, chatId);
+        else if (q.data === "edit_cancel") await cancelEditRequest(q.from, chatId);
+        else if (q.data?.startsWith("edit_buy:")) await showEditPurchaseInfo(q.from, chatId, q.data.slice(9));
+        else if (q.data?.startsWith("edit_admin:")) {
+          const parts = q.data.split(":");
+          if (parts.length === 3) await handleAdminEditAction(q.from, chatId, parts[1], parts[2]);
+        }
         else if (q.data?.startsWith("delete_bot:")) await confirmDeleteBot(q.from, chatId, q.data.slice(11), q.message?.message_id);
         else if (q.data?.startsWith("delete_confirm:")) await deleteBotFromFactory(q.from, chatId, q.data.slice(15), q.message?.message_id);
-        else if (q.data?.startsWith("delete_cancel:")) await showInstance(q.from, chatId, q.data.slice(14), q.message?.message_id);
+        else if (q.data?.startsWith("delete_cancel:")) {
+          const key = q.data.slice(14);
+          await showManagedInstance(q.from, chatId, key, q.message?.message_id);
+        }
       }
     }
     await markUpdateDone(claimedUpdateId);
     res.statusCode = 200; res.end("OK");
   } catch (error) {
-    // Do not log request bodies, bot tokens, Telegram API URLs, or raw exception messages.
     if (claimedUpdateId !== null) {
       try { await markUpdateFailed(claimedUpdateId); } catch { /* Telegram retry remains the recovery path. */ }
     }
