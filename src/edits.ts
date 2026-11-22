@@ -3,7 +3,6 @@ import { sql } from "./db.js";
 import { editMessageText, sendMessage, type InlineButton, type TelegramUser } from "./telegram.js";
 
 const token = () => process.env.FACTORY_BOT_TOKEN ?? "";
-const monthKey = "date_trunc('month', NOW())::date";
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]!));
@@ -41,6 +40,7 @@ export async function ensureEditSchema(): Promise<void> {
   `;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC)`;
+  await sql`CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (id BIGSERIAL PRIMARY KEY, instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE, owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id), delta INTEGER NOT NULL, source TEXT NOT NULL CHECK (source IN ('monthly_free','paid_purchase','admin_adjustment','request_consumption','refund')), reference_id UUID, actor_telegram_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
 }
 
 async function ensurePublicCode(instanceId: string, ownerId: number): Promise<string> {
@@ -63,7 +63,7 @@ async function ensurePublicCode(instanceId: string, ownerId: number): Promise<st
 
 export async function showManagedInstance(user: TelegramUser, chatId: number, templateKey: string, messageId?: number): Promise<void> {
   const rows = await sql`
-    SELECT id, template_key, status, bot_username, public_code, free_edit_credits, free_edit_period,
+    SELECT id, template_key, status, bot_username, public_code, free_edit_credits, to_char(free_edit_period, 'YYYY-MM-DD') AS free_edit_period,
       paid_edit_credits
     FROM factory_instances
     WHERE owner_telegram_id=${user.id} AND template_key=${templateKey}
@@ -82,7 +82,8 @@ export async function showManagedInstance(user: TelegramUser, chatId: number, te
   const paid = Number(row.paid_edit_credits ?? 0);
   const status = String(row.status);
   const statusLabel = status === "active" ? "نشطة" : status === "provisioning" ? "قيد التجهيز" : status === "failed" ? "تعذر تشغيلها" : status;
-  const text = `<b>تم إنشاء نسختك بنجاح</b>\n\n<b>${escapeHtml(String(row.bot_username ? "@" + row.bot_username : "نسختك"))}</b>\n<code>${code}</code>\n\nالحالة: <b>${statusLabel}</b>\n\n<b>إدارة نسختك</b>\nرصيد التعديل المجاني: <b>${free}</b>\nرصيد التعديلات المدفوعة: <b>${paid}</b>\n\nينتهي الرصيد المجاني غير المستخدم مع بداية الشهر الجديد.`;
+  const heading = status === "active" ? "تم إنشاء نسختك بنجاح" : status === "failed" ? "تعذر إكمال إنشاء نسختك" : "نسختك قيد التجهيز";
+  const text = `<b>${heading}</b>\n\n<b>${escapeHtml(String(row.bot_username ? "@" + row.bot_username : "نسختك"))}</b>\n<code>${code}</code>\n\nالحالة: <b>${statusLabel}</b>\n\n<b>إدارة نسختك</b>\nرصيد التعديل المجاني: <b>${free}</b>\nرصيد التعديلات المدفوعة: <b>${paid}</b>\n\nينتهي الرصيد المجاني غير المستخدم مع بداية الشهر الجديد.`;
   const keyboard: InlineButton[][] = [
     [{ text: "⚙️ تعديل على نسختك", callback_data: `edit_start:${row.id}`, style: "success" }],
     [{ text: "شراء تعديلات إضافية", callback_data: `edit_buy:${row.id}` }],
@@ -149,6 +150,11 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
   }
   const draft = drafts[0];
   const code = await ensurePublicCode(String(draft.instance_id), user.id);
+  const openRequests = await sql`SELECT 1 FROM factory_edit_requests WHERE instance_id=${draft.instance_id} AND status IN ('pending','in_progress') LIMIT 1`;
+  if (openRequests.length) {
+    await sendMessage(token(), chatId, "لديك بالفعل طلب تعديل مفتوح على هذه النسخة. انتظر إغلاقه قبل إرسال طلب جديد.");
+    return;
+  }
   const freeRows = await sql`
     UPDATE factory_instances
     SET free_edit_credits = CASE WHEN free_edit_period IS NULL OR free_edit_period < date_trunc('month', NOW())::date THEN 0 ELSE free_edit_credits - 1 END,
@@ -172,6 +178,7 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     paymentSource = "paid";
   }
   const requestId = randomUUID();
+  await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id) VALUES (${draft.instance_id}, ${user.id}, -1, 'request_consumption', ${requestId})`;
   await sql`
     INSERT INTO factory_edit_requests(id, instance_id, owner_telegram_id, public_code, request_text, status, payment_source)
     VALUES (${requestId}, ${draft.instance_id}, ${user.id}, ${code}, ${draft.request_text}, 'pending', ${paymentSource})
@@ -221,4 +228,17 @@ export async function showEditPurchaseInfo(user: TelegramUser, chatId: number, i
   const contact = process.env.FACTORY_SUPPORT_USERNAME ?? "";
   const suffix = contact ? `\nتواصل مع الإدارة: @${escapeHtml(contact.replace(/^@/, ""))}` : "\nأرسل للإدارة رمز نسختك لشراء رصيد إضافي.";
   await sendMessage(token(), chatId, `لشراء تعديلات إضافية لنسختك، أرسل رمز النسخة <code>${code}</code> للإدارة.${suffix}`);
+}
+
+export async function grantPaidCredits(admin: TelegramUser, chatId: number, publicCode: string, amount: number): Promise<void> {
+  const allowed = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").some((v) => v.trim() === String(admin.id));
+  if (!allowed || !/^[A-Z0-9-]{8,32}$/.test(publicCode) || !Number.isSafeInteger(amount) || amount < 1 || amount > 100) {
+    await sendMessage(token(), chatId, "صيغة الأمر غير صحيحة أو لا تملك صلاحية التنفيذ. الصيغة: /grant_edits XV-CODE 5");
+    return;
+  }
+  const rows = await sql`UPDATE factory_instances SET paid_edit_credits=paid_edit_credits+${amount}, updated_at=NOW() WHERE public_code=${publicCode} RETURNING id, owner_telegram_id`;
+  if (!rows.length) { await sendMessage(token(), chatId, "لم يتم العثور على نسخة بهذا الرمز."); return; }
+  await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, actor_telegram_id) VALUES (${rows[0].id}, ${rows[0].owner_telegram_id}, ${amount}, 'paid_purchase', ${admin.id})`;
+  await sendMessage(token(), chatId, `تم إضافة ${amount} رصيد تعديل مدفوع للنسخة <code>${escapeHtml(publicCode)}</code>.`);
+  await sendMessage(token(), Number(rows[0].owner_telegram_id), `تم إضافة ${amount} رصيد تعديل مدفوع إلى نسختك. رمز النسخة: <code>${escapeHtml(publicCode)}</code>`);
 }
