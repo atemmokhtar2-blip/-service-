@@ -49,7 +49,7 @@ async function ensurePublicCode(instanceId: string, ownerId: number): Promise<st
   if (!existing.length) throw new Error("instance_not_found");
   if (existing[0].public_code) return String(existing[0].public_code);
   for (let attempt = 0; attempt < 4; attempt++) {
-    const code = `XV-${randomBytes(7).toString("hex").toUpperCase()}`;
+    const code = `XV-${randomBytes(12).toString("hex").toUpperCase()}`;
     const rows = await sql`
       UPDATE factory_instances SET public_code=${code}, updated_at=NOW()
       WHERE id=${instanceId} AND owner_telegram_id=${ownerId} AND public_code IS NULL
@@ -220,14 +220,25 @@ export async function handleAdminEditAction(admin: TelegramUser, chatId: number,
   const rows = await sql`
     UPDATE factory_edit_requests SET status=${action}, handled_by=${admin.id}, updated_at=NOW()
     WHERE id=${requestId} AND status IN ('pending','in_progress')
-    RETURNING owner_telegram_id, public_code
+    RETURNING owner_telegram_id, public_code, instance_id, payment_source
   `;
   if (!rows.length) {
     await sendMessage(token(), chatId, "الطلب غير موجود أو تم إغلاقه بالفعل.");
     return;
   }
   const row = rows[0];
-  const labels: Record<string,string> = { in_progress: "بدأنا تنفيذ التعديل على نسختك.", completed: "اكتمل التعديل على نسختك.", rejected: "تعذر قبول طلب التعديل. تواصل مع الإدارة لمعرفة التفاصيل." };
+  if (action === "rejected") {
+    let refunded = false;
+    if (row.payment_source === "paid") {
+      const restored = await sql`UPDATE factory_instances SET paid_edit_credits=paid_edit_credits+1, updated_at=NOW() WHERE id=${row.instance_id} AND owner_telegram_id=${row.owner_telegram_id} RETURNING id`;
+      refunded = restored.length > 0;
+    } else {
+      const restored = await sql`UPDATE factory_instances SET free_edit_credits=free_edit_credits+1, updated_at=NOW() WHERE id=${row.instance_id} AND owner_telegram_id=${row.owner_telegram_id} AND free_edit_period=date_trunc('month', NOW())::date RETURNING id`;
+      refunded = restored.length > 0;
+    }
+    if (refunded) await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id, actor_telegram_id) VALUES (${row.instance_id}, ${row.owner_telegram_id}, 1, 'refund', ${requestId}, ${admin.id})`;
+  }
+  const labels: Record<string,string> = { in_progress: "بدأنا تنفيذ التعديل على نسختك.", completed: "اكتمل التعديل على نسختك.", rejected: "تعذر قبول طلب التعديل. تم إعادة الرصيد إن كان لا يزال صالحًا؛ تواصل مع الإدارة لمعرفة التفاصيل." };
   await sendMessage(token(), Number(row.owner_telegram_id), `${labels[action]}\nرمز النسخة: <code>${escapeHtml(String(row.public_code))}</code>`);
   await sendMessage(token(), chatId, action === "completed" ? "تم تسجيل اكتمال الطلب وإبلاغ صاحبه." : action === "rejected" ? "تم رفض الطلب وإبلاغ صاحبه." : "تم تحويل الطلب إلى قيد التنفيذ.");
 }
