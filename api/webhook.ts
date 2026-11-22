@@ -35,7 +35,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
       const user = update.message.from;
       const chatId = update.message.chat.id;
       if (update.message.text?.startsWith("/grant_edits ")) {
-        const parts = update.message.text.trim().split(/\\s+/);
+        const parts = update.message.text.trim().split(/\s+/);
         const amount = Number(parts[2]);
         await grantPaidCredits(user, chatId, String(parts[1] ?? "").toUpperCase(), amount);
       }
