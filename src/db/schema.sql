@@ -40,3 +40,45 @@ CREATE TABLE IF NOT EXISTS factory_telegram_updates (
   update_id BIGINT PRIMARY KEY,
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+
+ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS public_code TEXT;
+ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS free_edit_credits INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS free_edit_period DATE;
+ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS paid_edit_credits INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS factory_instances_public_code_unique ON factory_instances(public_code) WHERE public_code IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS factory_edit_drafts (
+  telegram_user_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id) ON DELETE CASCADE,
+  instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
+  request_text TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS factory_edit_requests (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
+  owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id),
+  public_code TEXT NOT NULL,
+  request_text TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','in_progress','completed','rejected')),
+  payment_source TEXT NOT NULL CHECK (payment_source IN ('free','paid')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  handled_by BIGINT,
+  admin_note TEXT
+);
+CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (
+  id BIGSERIAL PRIMARY KEY,
+  instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
+  owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id),
+  delta INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('monthly_free','paid_purchase','admin_adjustment','request_consumption','refund')),
+  reference_id UUID,
+  actor_telegram_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
