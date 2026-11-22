@@ -40,6 +40,7 @@ export async function ensureEditSchema(): Promise<void> {
   `;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC)`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_edit_requests_one_open_per_instance ON factory_edit_requests(instance_id) WHERE status IN ('pending','in_progress')`;
   await sql`CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (id BIGSERIAL PRIMARY KEY, instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE, owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id), delta INTEGER NOT NULL, source TEXT NOT NULL CHECK (source IN ('monthly_free','paid_purchase','admin_adjustment','request_consumption','refund')), reference_id UUID, actor_telegram_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
 }
 
@@ -117,7 +118,7 @@ export async function hasEditDraft(userId: number): Promise<boolean> {
 
 export async function captureEditText(user: TelegramUser, chatId: number, text: string): Promise<void> {
   const clean = text.trim();
-  if (clean.length < 20 || clean.length > 3000) {
+  if (clean.length < 20 || clean.length > 2000) {
     await sendMessage(token(), chatId, "اكتب وصفًا من 20 إلى 3000 حرف حتى نقدر نفهم التعديل بدقة.");
     return;
   }
@@ -178,11 +179,21 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     paymentSource = "paid";
   }
   const requestId = randomUUID();
-  await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id) VALUES (${draft.instance_id}, ${user.id}, -1, 'request_consumption', ${requestId})`;
-  await sql`
+  try {
+    await sql`
     INSERT INTO factory_edit_requests(id, instance_id, owner_telegram_id, public_code, request_text, status, payment_source)
     VALUES (${requestId}, ${draft.instance_id}, ${user.id}, ${code}, ${draft.request_text}, 'pending', ${paymentSource})
-  `;
+    `;
+  } catch {
+    if (paymentSource === 'free') {
+      await sql`UPDATE factory_instances SET free_edit_credits=free_edit_credits+1 WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id} AND free_edit_period=date_trunc('month', NOW())::date`;
+    } else {
+      await sql`UPDATE factory_instances SET paid_edit_credits=paid_edit_credits+1 WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id}`;
+    }
+    await sendMessage(token(), chatId, "تعذر تسجيل الطلب بسبب وجود طلب مفتوح أو تعارض مؤقت. لم يتم استهلاك رصيدك؛ حاول مرة أخرى بعد مراجعة صفحة نسختك.");
+    return;
+  }
+  await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id) VALUES (${draft.instance_id}, ${user.id}, -1, 'request_consumption', ${requestId})`;
   await sql`DELETE FROM factory_edit_drafts WHERE telegram_user_id=${user.id}`;
   await sendMessage(token(), chatId, `تم إرسال طلب التعديل بنجاح.\nرمز نسختك: <code>${code}</code>\nرقم الطلب: <code>${requestId.slice(0,8).toUpperCase()}</code>\nسيتم إشعارك عند بدء التنفيذ أو اكتماله.`);
   const admins = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").map((v) => Number(v.trim())).filter((v) => Number.isSafeInteger(v) && v > 0);
@@ -190,7 +201,7 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     console.error("factory_edit_admins_not_configured", { requestId });
     return;
   }
-  const owner = user.username ? `@${user.username}` : String(user.id);
+  const owner = [user.first_name, user.username ? `@${user.username}` : null].filter(Boolean).join(' · ') || String(user.id);
   const message = `<b>طلب تعديل جديد</b>\n\nالنسخة: <code>${code}</code>\nالقالب: <b>${escapeHtml(String(draft.template_key))}</b>\nالبوت: ${escapeHtml(String(draft.bot_username ? "@" + draft.bot_username : "غير محدد"))}\nالمالك: ${escapeHtml(owner)}\nTelegram ID: <code>${user.id}</code>\nمصدر الرصيد: <b>${paymentSource === "free" ? "مجاني" : "مدفوع"}</b>\nرقم الطلب: <code>${requestId}</code>\n\n<b>المطلوب:</b>\n${escapeHtml(String(draft.request_text))}`;
   const keyboard: InlineButton[][] = [
     [{ text: "بدء التنفيذ", callback_data: `edit_admin:in_progress:${requestId}`, style: "primary" }],
