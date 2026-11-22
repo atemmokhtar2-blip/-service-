@@ -151,7 +151,7 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
   const code = await ensurePublicCode(String(draft.instance_id), user.id);
   const freeRows = await sql`
     UPDATE factory_instances
-    SET free_edit_credits = CASE WHEN free_edit_period IS NULL OR free_edit_period < ${sql.unsafe ? "date_trunc('month', NOW())::date" : "date_trunc('month', NOW())::date"} THEN 0 ELSE free_edit_credits - 1 END,
+    SET free_edit_credits = CASE WHEN free_edit_period IS NULL OR free_edit_period < date_trunc('month', NOW())::date THEN 0 ELSE free_edit_credits - 1 END,
         free_edit_period = date_trunc('month', NOW())::date,
         updated_at=NOW()
     WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id}
