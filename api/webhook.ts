@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ensureSchema, markUpdateDone, markUpdateFailed, recordUpdate, sql } from "../src/db.js";
 import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
 import { confirmDeleteBot, deleteBotFromFactory, retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
-import { cancelEditRequest, captureEditText, confirmEditRequest, ensureEditSchema, handleAdminEditAction, hasEditDraft, showEditPurchaseInfo, showManagedInstance, startEditRequest } from "../src/edits.js";
+import { cancelEditRequest, captureEditText, confirmEditRequest, ensureEditSchema, handleAdminEditAction, hasEditDraft, showEditPurchaseInfo, showManagedInstance, startEditRequest, grantPaidCredits } from "../src/edits.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -34,11 +34,17 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
     if (update.message?.chat?.id && update.message.from && update.message.chat.type === "private") {
       const user = update.message.from;
       const chatId = update.message.chat.id;
-      if (update.message.text === "/start") await start(user, chatId);
+      if (update.message.text?.startsWith("/grant_edits ")) {
+        const parts = update.message.text.trim().split(/\\s+/);
+        const amount = Number(parts[2]);
+        await grantPaidCredits(user, chatId, String(parts[1] ?? "").toUpperCase(), amount);
+      }
+      else if (update.message.text === "/start") await start(user, chatId);
       else if (update.message.text === "/templates") await showTemplates(user, chatId);
       else if (update.message.text && !update.message.text.startsWith("/")) {
         if (await hasEditDraft(user.id)) {
-          await captureEditText(user, chatId, update.message.text);
+          const { requireMembership } = await import("../src/factory.js");
+          if (await requireMembership(user, chatId)) await captureEditText(user, chatId, update.message.text);
         } else {
           const pending = await sql`SELECT template_key FROM factory_pending_actions WHERE telegram_user_id=${user.id} AND action='awaiting_token' LIMIT 1`;
           if (!pending.length) {
