@@ -87,10 +87,19 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
           await retryProvision(q.from, chatId, key, q.message?.message_id);
           await showManagedInstance(q.from, chatId, key, q.message?.message_id);
         }
-        else if (q.data?.startsWith("edit_start:")) await startEditRequest(q.from, chatId, q.data.slice(11));
-        else if (q.data === "edit_confirm") await confirmEditRequest(q.from, chatId);
+        else if (q.data?.startsWith("edit_start:")) {
+          const { requireMembership } = await import("../src/factory.js");
+          if (await requireMembership(q.from, chatId, q.message?.message_id)) await startEditRequest(q.from, chatId, q.data.slice(11));
+        }
+        else if (q.data === "edit_confirm") {
+          const { requireMembership } = await import("../src/factory.js");
+          if (await requireMembership(q.from, chatId, q.message?.message_id)) await confirmEditRequest(q.from, chatId);
+        }
         else if (q.data === "edit_cancel") await cancelEditRequest(q.from, chatId);
-        else if (q.data?.startsWith("edit_buy:")) await showEditPurchaseInfo(q.from, chatId, q.data.slice(9));
+        else if (q.data?.startsWith("edit_buy:")) {
+          const { requireMembership } = await import("../src/factory.js");
+          if (await requireMembership(q.from, chatId, q.message?.message_id)) await showEditPurchaseInfo(q.from, chatId, q.data.slice(9));
+        }
         else if (q.data?.startsWith("edit_admin:")) {
           const parts = q.data.split(":");
           if (parts.length === 3) await handleAdminEditAction(q.from, chatId, parts[1], parts[2]);
