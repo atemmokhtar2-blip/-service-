@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS factory_edit_requests (
 );
 CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS factory_edit_requests_one_open_per_instance ON factory_edit_requests(instance_id) WHERE status IN ('pending','in_progress');
 
 CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (
   id BIGSERIAL PRIMARY KEY,
