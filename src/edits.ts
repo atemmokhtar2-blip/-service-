@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { sql } from "./db.js";
+import { consumeEditCredit, transitionEditRequest } from "./edit-credit-store.js";
 import { editMessageText, sendMessage, type InlineButton, type TelegramUser } from "./telegram.js";
 
 const token = () => process.env.FACTORY_BOT_TOKEN ?? "";
@@ -149,52 +150,19 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     await sendMessage(token(), chatId, "لا يوجد طلب تعديل جاهز للإرسال. ابدأ الطلب من صفحة نسختك.");
     return;
   }
-  const draft = drafts[0];
+  let draft = drafts[0];
   const code = await ensurePublicCode(String(draft.instance_id), user.id);
-  const openRequests = await sql`SELECT 1 FROM factory_edit_requests WHERE instance_id=${draft.instance_id} AND status IN ('pending','in_progress') LIMIT 1`;
-  if (openRequests.length) {
-    await sendMessage(token(), chatId, "لديك بالفعل طلب تعديل مفتوح على هذه النسخة. انتظر إغلاقه قبل إرسال طلب جديد.");
-    return;
-  }
-  const freeRows = await sql`
-    UPDATE factory_instances
-    SET free_edit_credits = CASE WHEN free_edit_period IS NULL OR free_edit_period < date_trunc('month', NOW())::date THEN 0 ELSE free_edit_credits - 1 END,
-        free_edit_period = date_trunc('month', NOW())::date,
-        updated_at=NOW()
-    WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id}
-      AND (free_edit_period IS NULL OR free_edit_period < date_trunc('month', NOW())::date OR free_edit_credits > 0)
-    RETURNING id
-  `;
-  let paymentSource: "free" | "paid" = "free";
-  if (!freeRows.length) {
-    const paidRows = await sql`
-      UPDATE factory_instances SET paid_edit_credits=paid_edit_credits-1, updated_at=NOW()
-      WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id} AND paid_edit_credits > 0
-      RETURNING id
-    `;
-    if (!paidRows.length) {
-      await sendMessage(token(), chatId, "رصيدك المجاني لهذا الشهر انتهى ولا يوجد رصيد مدفوع. تقدر تطلب شراء تعديلات إضافية من زر الشراء.");
-      return;
-    }
-    paymentSource = "paid";
-  }
   const requestId = randomUUID();
-  try {
-    await sql`
-    INSERT INTO factory_edit_requests(id, instance_id, owner_telegram_id, public_code, request_text, status, payment_source)
-    VALUES (${requestId}, ${draft.instance_id}, ${user.id}, ${code}, ${draft.request_text}, 'pending', ${paymentSource})
-    `;
-  } catch {
-    if (paymentSource === 'free') {
-      await sql`UPDATE factory_instances SET free_edit_credits=free_edit_credits+1 WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id} AND free_edit_period=date_trunc('month', NOW())::date`;
-    } else {
-      await sql`UPDATE factory_instances SET paid_edit_credits=paid_edit_credits+1 WHERE id=${draft.instance_id} AND owner_telegram_id=${user.id}`;
-    }
-    await sendMessage(token(), chatId, "تعذر تسجيل الطلب بسبب وجود طلب مفتوح أو تعارض مؤقت. لم يتم استهلاك رصيدك؛ حاول مرة أخرى بعد مراجعة صفحة نسختك.");
+  // A conflict or database failure rolls back the request, debit and ledger.
+  // Let the webhook retry infrastructure handle errors, including an uncertain
+  // commit response. A committed request has already consumed its draft.
+  const created = await consumeEditCredit(sql, user.id, requestId);
+  if (!created.length) {
+    await sendMessage(token(), chatId, "لم يتم إنشاء طلب جديد. راجع وجود طلب مفتوح ورصيد التعديلات ثم حاول مرة أخرى.");
     return;
   }
-  await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id) VALUES (${draft.instance_id}, ${user.id}, -1, 'request_consumption', ${requestId})`;
-  await sql`DELETE FROM factory_edit_drafts WHERE telegram_user_id=${user.id}`;
+  draft = created[0];
+  const paymentSource = String(draft.payment_source);
   await sendMessage(token(), chatId, `تم إرسال طلب التعديل بنجاح.\nرمز نسختك: <code>${code}</code>\nرقم الطلب: <code>${requestId.slice(0,8).toUpperCase()}</code>\nسيتم إشعارك عند بدء التنفيذ أو اكتماله.`);
   const admins = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").map((v) => Number(v.trim())).filter((v) => Number.isSafeInteger(v) && v > 0);
   if (!admins.length) {
@@ -217,27 +185,12 @@ export async function handleAdminEditAction(admin: TelegramUser, chatId: number,
   const allowed = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").some((v) => v.trim() === String(admin.id));
   if (!allowed) return;
   if (!["in_progress", "completed", "rejected"].includes(action)) return;
-  const rows = await sql`
-    UPDATE factory_edit_requests SET status=${action}, handled_by=${admin.id}, updated_at=NOW()
-    WHERE id=${requestId} AND status IN ('pending','in_progress')
-    RETURNING owner_telegram_id, public_code, instance_id, payment_source
-  `;
+  const rows = await transitionEditRequest(sql, admin.id, action, requestId);
   if (!rows.length) {
     await sendMessage(token(), chatId, "الطلب غير موجود أو تم إغلاقه بالفعل.");
     return;
   }
   const row = rows[0];
-  if (action === "rejected") {
-    let refunded = false;
-    if (row.payment_source === "paid") {
-      const restored = await sql`UPDATE factory_instances SET paid_edit_credits=paid_edit_credits+1, updated_at=NOW() WHERE id=${row.instance_id} AND owner_telegram_id=${row.owner_telegram_id} RETURNING id`;
-      refunded = restored.length > 0;
-    } else {
-      const restored = await sql`UPDATE factory_instances SET free_edit_credits=free_edit_credits+1, updated_at=NOW() WHERE id=${row.instance_id} AND owner_telegram_id=${row.owner_telegram_id} AND free_edit_period=date_trunc('month', NOW())::date RETURNING id`;
-      refunded = restored.length > 0;
-    }
-    if (refunded) await sql`INSERT INTO factory_edit_credit_ledger(instance_id, owner_telegram_id, delta, source, reference_id, actor_telegram_id) VALUES (${row.instance_id}, ${row.owner_telegram_id}, 1, 'refund', ${requestId}, ${admin.id})`;
-  }
   const labels: Record<string,string> = { in_progress: "بدأنا تنفيذ التعديل على نسختك.", completed: "اكتمل التعديل على نسختك.", rejected: "تعذر قبول طلب التعديل. تم إعادة الرصيد إن كان لا يزال صالحًا؛ تواصل مع الإدارة لمعرفة التفاصيل." };
   await sendMessage(token(), Number(row.owner_telegram_id), `${labels[action]}\nرمز النسخة: <code>${escapeHtml(String(row.public_code))}</code>`);
   await sendMessage(token(), chatId, action === "completed" ? "تم تسجيل اكتمال الطلب وإبلاغ صاحبه." : action === "rejected" ? "تم رفض الطلب وإبلاغ صاحبه." : "تم تحويل الطلب إلى قيد التنفيذ.");
