@@ -49,9 +49,10 @@ per request.
   request rows, first runs, or any runtime ordering, so a crashed enqueue is
   recovered the same way no matter what ran before or after it. Requests
   created before the cutoff are never emailed, so enabling it never
-  bulk-sends historic requests. With the cutoff unset, backfill is inert:
-  new requests are still emailed via their own enqueue, but a crashed
-  enqueue is not recovered.
+  bulk-sends historic requests. The cutoff is required: with it unset or
+  invalid the whole intake fails closed — nothing is enqueued, recovered,
+  or sent on any path (immediate enqueue, webhook processing, cron,
+  backfill).
 - Email arrival is typically fast but is not guaranteed instant. The
   database, not the inbox, is authoritative.
 
@@ -76,7 +77,7 @@ verification, not claimed in advance.
    - `GOOGLE_INTAKE_SENDER` — the Gmail address that authorized the token
    - `GOOGLE_INTAKE_CLIENT_ID`, `GOOGLE_INTAKE_CLIENT_SECRET`,
      `GOOGLE_INTAKE_REFRESH_TOKEN`
-   - `EDIT_INTAKE_ACTIVATED_AFTER` — explicit backfill cutoff (ISO 8601); see below
+   - `EDIT_INTAKE_ACTIVATED_AFTER` — explicit activation moment (ISO 8601), required; see below
 - `CRON_SECRET` — any strong random string; Vercel sends it to the cron
      route as a bearer token, and the route refuses calls without it.
 4. Set `EDIT_INTAKE_ACTIVATED_AFTER` to the current UTC time (ISO 8601) and
