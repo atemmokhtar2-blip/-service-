@@ -4,6 +4,7 @@ import { answerCallback, deleteMessage, sendMessage } from "../src/telegram.js";
 import { confirmDeleteBot, deleteBotFromFactory, retryProvision, showInstance, showMyBots, showTemplate, showTemplates, start, submitToken } from "../src/factory.js";
 import { cancelEditRequest, captureEditText, confirmEditRequest, ensureEditSchema, handleAdminEditAction, hasEditDraft, showEditPurchaseInfo, showManagedInstance, startEditRequest, grantPaidCredits } from "../src/edits.js";
 import { processEditIntakeOutboxSafely } from "../src/edit-intake.js";
+import { processGitHubEditOutboxSafely } from "../src/github-edit-intake.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
 
@@ -117,6 +118,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
     // Best-effort intake outbox retry/backfill. No-op unless the intake email
     // feature is enabled; guarded so it can never fail the update.
     await processEditIntakeOutboxSafely(sql);
+    await processGitHubEditOutboxSafely(sql, 5_000);
     res.statusCode = 200; res.end("OK");
   } catch (error) {
     if (claimedUpdateId !== null) {
