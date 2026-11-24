@@ -1,5 +1,5 @@
-import { loadSenderRefreshToken } from "./intake-setup.ts";
-import { decryptToken } from "./security.ts";
+import { loadSenderRefreshToken } from "./intake-setup.js";
+import { decryptToken } from "./security.js";
 
 // Optional email intake for factory edit requests.
 //
