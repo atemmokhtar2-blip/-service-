@@ -19,8 +19,8 @@
 //   token are never logged, rendered, or returned to the browser.
 // - The refresh token is stored only AES-256-GCM-encrypted (the same
 //   TOKEN_ENCRYPTION_KEY scheme as bot tokens in src/security.ts) in the
-//   singleton row of factory_intake_sender_auth. Nothing reads that row yet:
-//   wiring the intake to consume it is a separate reviewed change.
+//   singleton row of factory_intake_sender_auth. The sender reads it only when
+//   GOOGLE_INTAKE_AUTH_SOURCE=database and the intake is separately enabled.
 // - The granted scope is recorded as returned by Google so a later review can
 //   confirm the authorization never exceeded gmail.send.
 //
@@ -28,12 +28,12 @@
 // After a successful setup the route should be disabled again by unsetting
 // INTAKE_SETUP_ENABLED.
 
-import { randomBytes } from "node:crypto";
+import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 
 type Query = (strings: TemplateStringsArray, ...values: any[]) => Promise<any[]>;
 type Fetcher = typeof fetch;
 
-const STATE_TTL_MINUTES = 10;
+
 const EXCHANGE_TIMEOUT_MS = 8_000;
 export const INTAKE_SETUP_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 
@@ -53,7 +53,7 @@ export function intakeSetupConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const clientSecret = (env.GOOGLE_INTAKE_CLIENT_SECRET ?? "").trim();
   const sender = (env.GOOGLE_INTAKE_SENDER ?? "").trim();
   const baseUrl = (env.PUBLIC_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (ownerToken.length < 32 || !clientId || !clientSecret || !sender || !/^https:\/\//.test(baseUrl)) {
+  if (ownerToken.length < 32 || !clientId || !clientSecret || !sender || !validOrigin(baseUrl) || !/^[a-f0-9]{64}$/i.test(env.TOKEN_ENCRYPTION_KEY ?? "")) {
     console.warn("factory_intake_setup_config_incomplete");
     return null;
   }
@@ -85,7 +85,7 @@ export async function ensureIntakeSetupSchema(db: Query): Promise<void> {
 // callback to a flow the owner actually started here (CSRF protection).
 export async function createSetupState(db: Query): Promise<string> {
   const state = randomBytes(32).toString("hex");
-  await db`INSERT INTO factory_intake_setup_states(state) VALUES (${state})`;
+  await db`INSERT INTO factory_intake_setup_states(state) VALUES (${hashState(state)})`;
   return state;
 }
 
@@ -97,7 +97,7 @@ export async function consumeSetupState(db: Query, state: string): Promise<boole
   const rows = await db`
     UPDATE factory_intake_setup_states
     SET consumed_at = NOW()
-    WHERE state = ${state}
+    WHERE state = ${hashState(state)}
       AND consumed_at IS NULL
       AND created_at > NOW() - INTERVAL '10 minutes'
     RETURNING state
@@ -105,17 +105,19 @@ export async function consumeSetupState(db: Query, state: string): Promise<boole
   return rows.length === 1;
 }
 
-export function buildConsentUrl(config: IntakeSetupConfig, state: string): string {
+export function buildConsentUrl(config: IntakeSetupConfig, state: string, verifier: string): string {
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
     response_type: "code",
     scope: INTAKE_SETUP_SCOPE,
     access_type: "offline",
-    // prompt=consent makes Google return a refresh token on every run, so
-    // owner re-consent recovery always works.
+    // Request consent for offline access. Missing refresh tokens still fail closed.
     prompt: "consent",
     state,
+    code_challenge: hashState(verifier),
+    code_challenge_method: "S256",
+    login_hint: config.sender,
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
@@ -125,7 +127,8 @@ export type ExchangeResult = { refreshToken: string; grantedScope: string };
 // Exchanges the authorization code exactly once. Throws typed errors; the
 // caller maps them to a generic failure response. Token material never
 // appears in error messages or logs.
-export async function exchangeCodeForTokens(config: IntakeSetupConfig, code: string, fetcher: Fetcher = fetch): Promise<ExchangeResult> {
+export async function exchangeCodeForTokens(config: IntakeSetupConfig, code: string, verifier: string, fetcher: Fetcher = fetch): Promise<ExchangeResult> {
+  if (!/^[a-f0-9]{64}$/.test(verifier)) throw new Error("invalid_verifier");
   if (!code || code.length > 512 || /[\r\n]/.test(code)) throw new Error("invalid_code");
   const response = await fetcher("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -134,6 +137,7 @@ export async function exchangeCodeForTokens(config: IntakeSetupConfig, code: str
       client_id: config.clientId,
       client_secret: config.clientSecret,
       code,
+      code_verifier: verifier,
       grant_type: "authorization_code",
       redirect_uri: config.redirectUri,
     }).toString(),
@@ -142,7 +146,8 @@ export async function exchangeCodeForTokens(config: IntakeSetupConfig, code: str
   if (!response.ok) throw new Error(`token_exchange_http_${response.status}`);
   const payload = (await response.json()) as { refresh_token?: string; scope?: string };
   if (!payload.refresh_token) throw new Error("token_exchange_no_refresh_token");
-  return { refreshToken: payload.refresh_token, grantedScope: payload.scope ?? "" };
+  if (payload.scope !== INTAKE_SETUP_SCOPE) throw new Error("token_exchange_scope_rejected");
+  return { refreshToken: payload.refresh_token, grantedScope: payload.scope };
 }
 
 // Stores the encrypted refresh token in the singleton row. encrypt is
@@ -161,4 +166,35 @@ export async function storeSenderAuth(
       granted_scope = EXCLUDED.granted_scope,
       updated_at = NOW()
   `;
+}
+
+export function validOrigin(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" && !u.username && !u.password && !u.port && u.origin === value;
+  } catch { return false; }
+}
+export function hashState(value: string): string {
+  return createHash("sha256").update(value).digest("base64url");
+}
+export const SETUP_COOKIE = "__Secure-intake_setup";
+export function setupCookie(state: string, verifier: string): string {
+  return `${SETUP_COOKIE}=${state}.${verifier}; HttpOnly; Secure; SameSite=Lax; Path=/api/intake-setup; Max-Age=600`;
+}
+export function clearSetupCookie(): string {
+  return `${SETUP_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/api/intake-setup; Max-Age=0`;
+}
+export function browserVerifier(cookie: string, state: string): string | null {
+  const values = cookie.split(";").map(s => s.trim()).filter(s => s.startsWith(`${SETUP_COOKIE}=`));
+  if (values.length !== 1 || !/^[a-f0-9]{64}$/.test(state)) return null;
+  const parts = values[0].slice(SETUP_COOKIE.length + 1).split(".");
+  if (parts.length !== 2 || !parts.every(p => /^[a-f0-9]{64}$/.test(p))) return null;
+  return timingSafeEqual(Buffer.from(parts[0]), Buffer.from(state)) ? parts[1] : null;
+}
+export async function loadSenderRefreshToken(db: Query, sender: string, decrypt: (v: string) => string): Promise<string> {
+  const rows = await db`SELECT sender, encrypted_refresh_token, granted_scope FROM factory_intake_sender_auth WHERE id = 1`;
+  if (rows.length !== 1 || rows[0].sender !== sender || rows[0].granted_scope !== INTAKE_SETUP_SCOPE) throw new Error("sender_auth_invalid");
+  const token = decrypt(String(rows[0].encrypted_refresh_token));
+  if (!token) throw new Error("sender_auth_invalid");
+  return token;
 }
