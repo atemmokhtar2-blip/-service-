@@ -6,8 +6,8 @@ import { PGlite } from '@electric-sql/pglite';
 import {
   intakeConfigFromEnv,
   ensureEditIntakeSchema,
-  activateEditIntake,
   enqueueEditIntake,
+  enqueueEditIntakeSafely,
   backfillEditIntake,
   claimEditIntakeBatch,
   processEditIntakeOutbox,
@@ -22,9 +22,13 @@ const CONFIG = {
   clientId: 'cid',
   clientSecret: 'csecret',
   refreshToken: 'rtoken',
+  // Explicit cutoff configured by the operator before enabling; backfill only
+  // recovers requests created at or after this moment.
+  activatedAfter: new Date(Date.now() - 30 * 60 * 1000),
 };
+const CONFIG_NO_CUTOFF = { ...CONFIG, activatedAfter: null };
 
-async function fixture({ activate = true } = {}) {
+async function fixture() {
   const pg = new PGlite();
   await pg.exec(await readFile(new URL('../src/db/schema.sql', import.meta.url), 'utf8'));
   const instanceId = randomUUID();
@@ -36,7 +40,6 @@ async function fixture({ activate = true } = {}) {
     return (await pg.query(text, values)).rows;
   };
   await ensureEditIntakeSchema(db);
-  if (activate) await activateEditIntake(db);
   async function addRequest({ requestText = 'Please change the welcome message', createdAt = null, status = 'pending' } = {}) {
     const requestId = randomUUID();
     if (createdAt) {
@@ -64,6 +67,7 @@ function fieldsFor(requestId, overrides = {}) {
     botUsername: 'test_bot',
     paymentSource: 'free',
     requestText: 'Please change the welcome message',
+    createdAt: new Date(),
     ...overrides,
   };
 }
@@ -90,7 +94,54 @@ test('disabled unless explicitly enabled, and config requires every variable', (
     GOOGLE_INTAKE_CLIENT_SECRET: CONFIG.clientSecret,
     GOOGLE_INTAKE_REFRESH_TOKEN: CONFIG.refreshToken,
   };
-  assert.deepEqual(intakeConfigFromEnv(full), CONFIG);
+  // No cutoff configured: the config itself is refused, so every send path
+  // (immediate enqueue, webhook processing, cron, backfill) fails closed.
+  assert.equal(intakeConfigFromEnv(full), null);
+  const withCutoff = { ...full, EDIT_INTAKE_ACTIVATED_AFTER: CONFIG.activatedAfter.toISOString() };
+  assert.deepEqual(intakeConfigFromEnv(withCutoff), CONFIG);
+  // An unparseable cutoff also fails closed; it is never guessed or derived.
+  assert.equal(intakeConfigFromEnv({ ...full, EDIT_INTAKE_ACTIVATED_AFTER: 'not-a-date' }), null);
+});
+
+test('missing or invalid cutoff fails closed on the immediate enqueue path', async () => {
+  const f = await fixture();
+  const KEYS = [
+    'EDIT_INTAKE_EMAIL_ENABLED', 'EDIT_INTAKE_EMAIL_TO', 'GOOGLE_INTAKE_SENDER',
+    'GOOGLE_INTAKE_CLIENT_ID', 'GOOGLE_INTAKE_CLIENT_SECRET', 'GOOGLE_INTAKE_REFRESH_TOKEN',
+    'EDIT_INTAKE_ACTIVATED_AFTER',
+  ];
+  const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  const restore = () => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  };
+  try {
+    Object.assign(process.env, {
+      EDIT_INTAKE_EMAIL_ENABLED: 'true',
+      EDIT_INTAKE_EMAIL_TO: CONFIG.to,
+      GOOGLE_INTAKE_SENDER: CONFIG.sender,
+      GOOGLE_INTAKE_CLIENT_ID: CONFIG.clientId,
+      GOOGLE_INTAKE_CLIENT_SECRET: CONFIG.clientSecret,
+      GOOGLE_INTAKE_REFRESH_TOKEN: CONFIG.refreshToken,
+    });
+    // Enabled with every credential but no cutoff: nothing is enqueued.
+    delete process.env.EDIT_INTAKE_ACTIVATED_AFTER;
+    await enqueueEditIntakeSafely(f.db, fieldsFor(await f.addRequest({ status: 'completed' })));
+    assert.equal(await f.count(), 0);
+    // Invalid cutoff: same fail-closed behavior, never guessed.
+    process.env.EDIT_INTAKE_ACTIVATED_AFTER = 'not-a-date';
+    const blocked = await f.addRequest({ status: 'completed' });
+    await enqueueEditIntakeSafely(f.db, fieldsFor(blocked));
+    assert.equal(await f.count(), 0);
+    // A valid explicit cutoff reopens the same path.
+    process.env.EDIT_INTAKE_ACTIVATED_AFTER = CONFIG.activatedAfter.toISOString();
+    await enqueueEditIntakeSafely(f.db, fieldsFor(blocked));
+    assert.equal(await f.count(), 1);
+  } finally {
+    restore();
+    await f.pg.close();
+  }
 });
 
 test('enqueue is idempotent per request and email carries no tokens or owner identity', async () => {
@@ -112,41 +163,60 @@ test('enqueue is idempotent per request and email carries no tokens or owner ide
   } finally { await f.pg.close(); }
 });
 
-test('backfill grace window covers a crashed first enqueue at the activation boundary', async () => {
-  const f = await fixture({ activate: false });
-  // The normal boundary case: the first enabled request is created moments
-  // before activation is recorded, so its enqueue crashing must not skip it.
-  const boundary = await f.addRequest({ createdAt: new Date(Date.now() - 60 * 1000) });
-  await activateEditIntake(f.db);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
-  assert.ok(await f.outbox(boundary));
-});
-
-test('backfill grace window excludes requests older than 5 minutes before activation', async () => {
-  const f = await fixture({ activate: false });
-  const old = await f.addRequest({ createdAt: new Date(Date.now() - 10 * 60 * 1000) });
-  await activateEditIntake(f.db);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
-  assert.equal(await f.outbox(old), undefined);
-});
-
-test('backfill covers only requests created after activation, and runs once per request', async () => {
-  const f = await fixture({ activate: false });
+test('backfill covers only requests created at/after the configured cutoff, and runs once per request', async () => {
+  const f = await fixture();
   try {
-    const beforeActivation = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
-    await activateEditIntake(f.db);
-    const afterActivation = await f.addRequest();
+    const beforeCutoff = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
+    const afterCutoff = await f.addRequest();
     assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
     assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
     assert.equal(await f.count(), 1);
-    assert.ok(await f.outbox(afterActivation));
-    assert.equal(await f.outbox(beforeActivation), undefined);
-    // Without any activation record at all, nothing is backfilled.
-    const g = await fixture({ activate: false });
+    assert.ok(await f.outbox(afterCutoff));
+    assert.equal(await f.outbox(beforeCutoff), undefined);
+    // Without a configured cutoff, nothing is recovered even when a request
+    // created after enabling is missing its outbox row (crashed enqueue).
+    const g = await fixture();
     try {
       await g.addRequest();
-      assert.equal(await backfillEditIntake(g.db, CONFIG), 0);
+      assert.equal(await backfillEditIntake(g.db, CONFIG_NO_CUTOFF), 0);
     } finally { await g.pg.close(); }
+  } finally { await f.pg.close(); }
+});
+
+test('a request created exactly at the cutoff is included', async () => {
+  const f = await fixture();
+  try {
+    const at = await f.addRequest({ createdAt: CONFIG.activatedAfter });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+    assert.ok(await f.outbox(at));
+  } finally { await f.pg.close(); }
+});
+
+test('ordering failure: crashed first enqueue then a second request never loses the first', async () => {
+  const f = await fixture();
+  try {
+    // R1 commits, its enqueue crashes (no outbox row), then R2 commits. The
+    // boundary is the configured cutoff, not anything derived from runtime
+    // ordering, so R1 is recovered regardless of R2.
+    const r1 = await f.addRequest({ createdAt: new Date(Date.now() - 10 * 60 * 1000), status: 'completed' });
+    const r2 = await f.addRequest({ createdAt: new Date(Date.now() - 5 * 60 * 1000) });
+    const before = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'rejected' });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 2);
+    assert.ok(await f.outbox(r1));
+    assert.ok(await f.outbox(r2));
+    assert.equal(await f.outbox(before), undefined);
+  } finally { await f.pg.close(); }
+});
+
+test('ordering failure: a pass running before any request cannot move the boundary', async () => {
+  const f = await fixture();
+  try {
+    // A cron/webhook pass runs first (no requests yet); later requests are
+    // still bounded only by the configured cutoff.
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
+    const r1 = await f.addRequest({ createdAt: new Date(Date.now() - 5 * 60 * 1000) });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+    assert.ok(await f.outbox(r1));
   } finally { await f.pg.close(); }
 });
 
@@ -272,4 +342,42 @@ test('raw message rejects header injection and encodes UTF-8 subject', () => {
     () => buildRawMessage({ ...CONFIG, to: 'a@example.com\r\nBCC: x@y.z' }, 's', 'b'),
     /invalid_address_header/,
   );
+});
+
+test('immediate enqueue rejects a request created before the cutoff, even with a valid cutoff set', async () => {
+  const f = await fixture();
+  try {
+    // A replayed or delayed request whose created_at predates the activation
+    // moment is never enqueued, so it is never emailed.
+    const oldMoment = new Date(CONFIG.activatedAfter.getTime() - 1000);
+    const oldId = await f.addRequest({ createdAt: oldMoment, status: 'completed' });
+    assert.equal(await enqueueEditIntake(f.db, CONFIG, fieldsFor(oldId, { createdAt: oldMoment })), false);
+    assert.equal(await f.count(), 0);
+    // A fresh request passes the same guard.
+    const freshId = await f.addRequest();
+    assert.equal(await enqueueEditIntake(f.db, CONFIG, fieldsFor(freshId)), true);
+    assert.equal(await f.count(), 1);
+  } finally { await f.pg.close(); }
+});
+
+test('processing never sends a pre-existing outbox row whose request predates the cutoff', async () => {
+  const f = await fixture();
+  try {
+    const oldId = await f.addRequest({ createdAt: new Date(CONFIG.activatedAfter.getTime() - 3600 * 1000), status: 'completed' });
+    // Simulates a row enqueued before the cutoff existed or by a path that
+    // missed the guard.
+    await f.db`INSERT INTO factory_edit_intake_outbox(request_id, recipient, subject, body_text) VALUES (${oldId}::uuid, ${CONFIG.to}, 'OLD SUBJECT', 'old body')`;
+    const freshId = await f.addRequest();
+    await enqueueEditIntake(f.db, CONFIG, fieldsFor(freshId));
+    const calls = [];
+    const result = await processEditIntakeOutbox(f.db, CONFIG, fetcherReturning({ calls }));
+    const sendCalls = calls.filter((c) => !c.url.includes('oauth2.googleapis.com/token'));
+    assert.equal(sendCalls.length, 1);
+    assert.equal(result.sent, 1);
+    assert.equal(result.failed, 1);
+    const oldRow = await f.outbox(oldId);
+    assert.equal(oldRow.status, 'failed');
+    assert.equal(oldRow.last_error, 'pre_cutoff');
+    assert.equal((await f.outbox(freshId)).status, 'sent');
+  } finally { await f.pg.close(); }
 });

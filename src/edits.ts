@@ -191,6 +191,7 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     botUsername: draft.bot_username ? String(draft.bot_username) : null,
     paymentSource,
     requestText: String(draft.request_text),
+    createdAt: draft.created_at as Date,
   });
 }
 

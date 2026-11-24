@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { sql } from "../src/db.js";
-import { intakeConfigFromEnv, ensureEditIntakeSchema, activateEditIntake, processEditIntakeOutbox } from "../src/edit-intake.js";
+import { intakeConfigFromEnv, ensureEditIntakeSchema, processEditIntakeOutbox } from "../src/edit-intake.js";
 
 // Scheduled reconciliation for the edit-request intake outbox. This bounds
 // the delay of pending sends when the factory sees no Telegram traffic: the
@@ -17,7 +17,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   if (!config) { res.statusCode = 200; res.end("Intake disabled"); return; }
   try {
     await ensureEditIntakeSchema(sql);
-    await activateEditIntake(sql);
     const result = await processEditIntakeOutbox(sql, config, undefined, 20_000);
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");

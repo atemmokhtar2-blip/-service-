@@ -43,12 +43,19 @@ per request.
   by a killed process becomes claimable again after 10 minutes; its attempt
   was already counted, and rows give up after 5 attempts as `failed` for
   manual review.
-- Backfill only covers requests created **around or after the feature's
-  recorded activation time** (first enabled run): a 5-minute grace window
-  before it ensures a request whose first enqueue crashed at the boundary is
-  still recovered. Requests created while the feature was off are never
-  emailed beyond that window, so enabling it never bulk-sends historic
-  requests.
+- Backfill only covers requests created **at or after an explicit cutoff
+  configured by the operator** (`EDIT_INTAKE_ACTIVATED_AFTER`, set before
+  enabling). The boundary never moves on its own: it is not derived from
+  request rows, first runs, or any runtime ordering, so a crashed enqueue is
+  recovered the same way no matter what ran before or after it. Requests
+  created before the cutoff are never emailed, so enabling it never
+  bulk-sends historic requests. The cutoff is required: with it unset or
+  invalid the whole intake fails closed — nothing is enqueued, recovered,
+  or sent on any path (immediate enqueue, webhook processing, cron,
+  backfill). The cutoff also binds the immediate path directly: a replayed
+  or delayed request whose `created_at` predates it is never enqueued, and
+  a pre-existing outbox row whose request predates it is marked `failed`
+  (`pre_cutoff`) and never sent.
 - Email arrival is typically fast but is not guaranteed instant. The
   database, not the inbox, is authoritative.
 
@@ -73,10 +80,14 @@ verification, not claimed in advance.
    - `GOOGLE_INTAKE_SENDER` — the Gmail address that authorized the token
    - `GOOGLE_INTAKE_CLIENT_ID`, `GOOGLE_INTAKE_CLIENT_SECRET`,
      `GOOGLE_INTAKE_REFRESH_TOKEN`
-   - `CRON_SECRET` — any strong random string; Vercel sends it to the cron
+   - `EDIT_INTAKE_ACTIVATED_AFTER` — explicit activation moment (ISO 8601), required; see below
+- `CRON_SECRET` — any strong random string; Vercel sends it to the cron
      route as a bearer token, and the route refuses calls without it.
-4. Redeploy. The outbox and state tables are created automatically on the
-   first enabled run, and the activation timestamp is recorded then.
+4. Set `EDIT_INTAKE_ACTIVATED_AFTER` to the current UTC time (ISO 8601) and
+   redeploy. The cutoff marks "requests from this moment on may be emailed";
+   setting it just before the enabling deploy keeps every earlier request
+   excluded. The outbox table is created automatically on the first enabled
+   run.
 
 The cron schedule in `vercel.json` is daily at 06:00 UTC. Vercel Hobby runs
 cron jobs at most once per day; on plans that allow more frequent runs the
@@ -95,7 +106,7 @@ Google Account permissions if it may have leaked.
    a test instance and confirm: the Telegram admin message still arrives
    first, one outbox row reaches `sent`, and the intake inbox receives one
    email with the request UUID and XV code. Requests created before
-   more than 5 minutes before activation must NOT receive emails.
+   before the configured cutoff must NOT receive emails.
 3. Disable the flag again and confirm no new outbox rows are created.
 
 ## Security notes

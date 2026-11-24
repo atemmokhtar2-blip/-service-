@@ -11,12 +11,17 @@
 // deduplicate by the request UUID carried in every message. The reverse loss
 // is covered: the outbox row survives the crash and is retried by later
 // webhook calls, by the daily cron route (api/intake-cron.ts), and by a
-// backfill that re-enqueues requests created after activation that have no
-// outbox row.
+// backfill that re-enqueues requests created at or after the configured
+// activation moment that have no outbox row.
 //
-// Backfill is bounded by the activation timestamp recorded the first time the
-// feature runs enabled: requests created before activation are never emailed,
-// so enabling the feature never bulk-sends historic requests.
+// The activation moment is explicit: EDIT_INTAKE_ACTIVATED_AFTER must hold a
+// valid ISO 8601 timestamp chosen by the operator before enabling. Requests
+// created before it are never emailed, so enabling never bulk-sends historic
+// requests. When it is missing or invalid the whole feature fails closed: no
+// enqueue, no backfill, no send. The same cutoff binds every path, not just
+// backfill: a replayed or delayed request created before it is never
+// enqueued, and a pre-existing outbox row whose request predates it is never
+// sent.
 //
 // factory_edit_requests remains the source of truth. The email is a
 // notification copy only; it never carries bot tokens or owner identifiers.
@@ -38,6 +43,14 @@ export type IntakeConfig = {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  // Explicit activation moment configured by the operator before enabling.
+  // Always set: intakeConfigFromEnv refuses to produce a config without a
+  // valid cutoff, so every send path (immediate enqueue, cron, backfill)
+  // fails closed when it is missing or invalid. Backfill only recovers
+  // requests created at or after this moment; there is no automatic cutoff,
+  // so requests created before it are never emailed, whatever the runtime
+  // ordering.
+  activatedAfter: Date | null;
 };
 
 export type IntakeRequestFields = {
@@ -47,6 +60,12 @@ export type IntakeRequestFields = {
   botUsername: string | null;
   paymentSource: string;
   requestText: string;
+  // The request row's created_at, carried by the caller from the database
+  // record (never recomputed as "now") so replays and delayed deliveries keep
+  // their original moment. The explicit cutoff is enforced against it on
+  // every enqueue. Pass the driver's raw value (Date or timestamp string);
+  // coercion preserves millisecond precision.
+  createdAt: Date;
 };
 
 export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): IntakeConfig | null {
@@ -61,7 +80,20 @@ export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Intak
     console.warn("factory_edit_intake_config_incomplete");
     return null;
   }
-  return { to, sender, clientId, clientSecret, refreshToken };
+  // Fail closed on the cutoff: without a valid explicit activation moment
+  // there is no boundary separating pre-activation requests, so nothing may
+  // enqueue or send at all, on any path.
+  const cutoffRaw = (env.EDIT_INTAKE_ACTIVATED_AFTER ?? "").trim();
+  if (!cutoffRaw) {
+    console.warn("factory_edit_intake_cutoff_missing");
+    return null;
+  }
+  const cutoffMs = Date.parse(cutoffRaw);
+  if (Number.isNaN(cutoffMs)) {
+    console.warn("factory_edit_intake_cutoff_invalid");
+    return null;
+  }
+  return { to, sender, clientId, clientSecret, refreshToken, activatedAfter: new Date(cutoffMs) };
 }
 
 export async function ensureEditIntakeSchema(db: Query): Promise<void> {
@@ -79,21 +111,6 @@ export async function ensureEditIntakeSchema(db: Query): Promise<void> {
       sent_at TIMESTAMPTZ
     )
   `;
-  await db`
-    CREATE TABLE IF NOT EXISTS factory_edit_intake_state (
-      id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-      activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `;
-}
-
-// Records the first moment the feature ran enabled. Backfill applies a grace
-// window before this point (see backfillEditIntake): the first enabled call
-// happens right after the first enabled request is created, so a strict
-// activation boundary would permanently skip a request whose first enqueue
-// crashed.
-export async function activateEditIntake(db: Query): Promise<void> {
-  await db`INSERT INTO factory_edit_intake_state(id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING`;
 }
 
 export function buildIntakeSubject(fields: IntakeRequestFields): string {
@@ -184,28 +201,39 @@ export function createIntakeSender(config: IntakeConfig, fetcher: Fetcher = fetc
   };
 }
 
-export async function enqueueEditIntake(db: Query, config: IntakeConfig, fields: IntakeRequestFields): Promise<void> {
+// Enqueues one request for the intake email. The explicit cutoff binds this
+// immediate path exactly like backfill: a request created before the
+// activation moment (a replay, a delayed delivery, a retry of an old row) is
+// never enqueued, so it is never emailed. Returns true when a row was
+// enqueued (or already existed) and false when the cutoff rejected it.
+export async function enqueueEditIntake(db: Query, config: IntakeConfig, fields: IntakeRequestFields): Promise<boolean> {
+  // Coerce without String(): String(Date) drops milliseconds, which would
+  // shift a boundary-exact request across the cutoff.
+  const createdAt = fields.createdAt instanceof Date ? fields.createdAt : new Date(String(fields.createdAt));
+  if (!config.activatedAfter || Number.isNaN(createdAt.getTime()) || createdAt.getTime() < config.activatedAfter.getTime()) return false;
   await db`
     INSERT INTO factory_edit_intake_outbox(request_id, recipient, subject, body_text)
     VALUES (${fields.requestId}::uuid, ${config.to}, ${buildIntakeSubject(fields)}, ${buildIntakeBody(fields)})
     ON CONFLICT (request_id) DO NOTHING
   `;
+  return true;
 }
 
-// Re-enqueue requests that have no outbox row: for example after a crash
-// between the request commit and the enqueue. The lower bound is the recorded
-// activation time minus a 5-minute grace window, so a request created just
-// before the first enabled call (the normal boundary case) is still recovered.
-// A request created up to 5 minutes before activation can be admitted;
-// anything older is never emailed.
+// Re-enqueue requests created at or after the explicitly configured cutoff
+// that have no outbox row: for example after a crash between the request
+// commit and the enqueue, in any runtime ordering. Requests created before
+// the cutoff are never emailed. With no cutoff configured, nothing is
+// recovered and this is a no-op.
 export async function backfillEditIntake(db: Query, config: IntakeConfig): Promise<number> {
+  if (!config.activatedAfter) return 0;
   const missing = await db`
-    SELECT r.id, r.public_code, r.request_text, r.payment_source, i.template_key, i.bot_username
+    SELECT r.id, r.public_code, r.request_text, r.payment_source, r.created_at, i.template_key, i.bot_username
     FROM factory_edit_requests r
     JOIN factory_instances i ON i.id = r.instance_id
-    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at - INTERVAL '5 minutes'
     LEFT JOIN factory_edit_intake_outbox o ON o.request_id = r.id
-    WHERE o.request_id IS NULL AND r.created_at > NOW() - INTERVAL '2 days'
+    WHERE o.request_id IS NULL
+      AND r.created_at >= ${config.activatedAfter.toISOString()}::timestamptz
+      AND r.created_at > NOW() - INTERVAL '2 days'
     ORDER BY r.created_at ASC
     LIMIT ${BACKFILL_LIMIT}
   `;
@@ -217,6 +245,7 @@ export async function backfillEditIntake(db: Query, config: IntakeConfig): Promi
       botUsername: row.bot_username ? String(row.bot_username) : null,
       paymentSource: String(row.payment_source),
       requestText: String(row.request_text),
+      createdAt: row.created_at as Date,
     });
   }
   return missing.length;
@@ -241,7 +270,8 @@ export async function claimEditIntakeBatch(db: Query, limit: number = BATCH_LIMI
     UPDATE factory_edit_intake_outbox o
     SET status = 'sending', attempts = o.attempts + 1, updated_at = NOW()
     FROM picked WHERE o.request_id = picked.request_id
-    RETURNING o.request_id, o.subject, o.body_text, o.attempts
+    RETURNING o.request_id, o.subject, o.body_text, o.attempts,
+      (SELECT r.created_at FROM factory_edit_requests r WHERE r.id = o.request_id) AS request_created_at
   `;
 }
 
@@ -258,7 +288,8 @@ export async function processEditIntakeOutbox(
   fetcher?: Fetcher,
   budgetMs: number = DEFAULT_BUDGET_MS,
 ): Promise<{ sent: number; failed: number }> {
-  if (!config) return { sent: 0, failed: 0 };
+  if (!config || !config.activatedAfter) return { sent: 0, failed: 0 };
+  const cutoff = config.activatedAfter.getTime();
   await backfillEditIntake(db, config);
   const send = createIntakeSender(config, fetcher ?? fetch);
   const deadline = Date.now() + budgetMs;
@@ -268,6 +299,20 @@ export async function processEditIntakeOutbox(
   for (const row of claimed) {
     const requestId = String(row.request_id);
     const attempts = Number(row.attempts);
+    // A pre-existing outbox row whose request predates the cutoff (enqueued
+    // before the cutoff existed, or by any path that missed the guard) is
+    // never sent; mark it failed so it leaves the retry rotation.
+    const rawCreated = row.request_created_at;
+    const createdDate = rawCreated instanceof Date ? rawCreated : rawCreated ? new Date(String(rawCreated)) : null;
+    const requestCreatedAt = createdDate && !Number.isNaN(createdDate.getTime()) ? createdDate.getTime() : null;
+    if (requestCreatedAt === null || requestCreatedAt < cutoff) {
+      await db`
+        UPDATE factory_edit_intake_outbox SET status = 'failed', last_error = 'pre_cutoff', updated_at = NOW()
+        WHERE request_id = ${requestId}::uuid
+      `;
+      failed++;
+      continue;
+    }
     if (Date.now() >= deadline) {
       // No time left: release the claim so a later call retries promptly.
       await db`
@@ -308,7 +353,6 @@ export async function enqueueEditIntakeSafely(db: Query, fields: IntakeRequestFi
     const config = intakeConfigFromEnv();
     if (!config) return;
     await ensureEditIntakeSchema(db);
-    await activateEditIntake(db);
     await enqueueEditIntake(db, config, fields);
   } catch (error) {
     console.error("factory_edit_intake_enqueue_failed", {
@@ -324,7 +368,6 @@ export async function processEditIntakeOutboxSafely(db: Query, budgetMs: number 
     const config = intakeConfigFromEnv();
     if (!config) return;
     await ensureEditIntakeSchema(db);
-    await activateEditIntake(db);
     const result = await processEditIntakeOutbox(db, config, undefined, budgetMs);
     if (result.sent || result.failed) {
       console.warn("factory_edit_intake_processed", { ...result, duration_ms: Date.now() - startedAt });
