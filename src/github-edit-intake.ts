@@ -49,7 +49,7 @@ export async function ensureGitHubEditOutboxSchema(db: Query): Promise<void> {
 }
 
 function quoteUntrustedText(value: string): string {
-  return value.split("\n").map((line) => `> ${line.replace(/@/g, "@\\u200b")}`).join("\n");
+  return value.split("\n").map((line) => `> ${line.replace(/@/g, "@\u200b")}`).join("\n");
 }
 
 function marker(requestId: string): string {
@@ -107,13 +107,15 @@ async function githubRequest(
 }
 
 async function findExistingIssue(config: Config, requestId: string, fetcher: Fetcher): Promise<any | null> {
-  const query = `repo:${config.repo} in:body ${marker(requestId)}`;
+  const query = `repo:${config.repo} in:body "${requestId}"`;
   const url = `/search/issues?q=${encodeURIComponent(query)}&per_page=1`;
   const result = await githubRequest(config, url, {}, fetcher);
   return Array.isArray(result?.items) && result.items.length ? result.items[0] : null;
 }
 
 async function publishIssue(config: Config, row: any, fetcher: Fetcher): Promise<{ number: number; html_url: string }> {
+  const repository = await githubRequest(config, `/repos/${config.repo}`, {}, fetcher);
+  if (repository?.private !== true) throw new Error("github_edit_repository_must_be_private");
   const requestId = String(row.request_id);
   // Search first to make retries idempotent if GitHub created the issue but
   // the function crashed before recording the outbox success.
