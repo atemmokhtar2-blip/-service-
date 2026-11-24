@@ -73,6 +73,28 @@ CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_reque
 CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS factory_edit_requests_one_open_per_instance ON factory_edit_requests(instance_id) WHERE status IN ('pending','in_progress');
 
+-- Optional email intake outbox (disabled unless EDIT_INTAKE_EMAIL_ENABLED=true).
+-- One row per edit request; sends are retried from this table, keyed by request_id.
+CREATE TABLE IF NOT EXISTS factory_edit_intake_outbox (
+  request_id UUID PRIMARY KEY REFERENCES factory_edit_requests(id) ON DELETE CASCADE,
+  recipient TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ
+);
+
+-- Records when the intake feature first ran enabled; backfill never emails
+-- requests created before this point.
+CREATE TABLE IF NOT EXISTS factory_edit_intake_state (
+  id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+  activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (
   id BIGSERIAL PRIMARY KEY,
   instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
