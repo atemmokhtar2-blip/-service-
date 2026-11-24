@@ -88,13 +88,6 @@ CREATE TABLE IF NOT EXISTS factory_edit_intake_outbox (
   sent_at TIMESTAMPTZ
 );
 
--- Records when the intake feature first ran enabled; backfill never emails
--- requests created before this point.
-CREATE TABLE IF NOT EXISTS factory_edit_intake_state (
-  id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-  activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (
   id BIGSERIAL PRIMARY KEY,
   instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
