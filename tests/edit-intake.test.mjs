@@ -112,6 +112,24 @@ test('enqueue is idempotent per request and email carries no tokens or owner ide
   } finally { await f.pg.close(); }
 });
 
+test('backfill grace window covers a crashed first enqueue at the activation boundary', async () => {
+  const f = await fixture({ activate: false });
+  // The normal boundary case: the first enabled request is created moments
+  // before activation is recorded, so its enqueue crashing must not skip it.
+  const boundary = await f.addRequest({ createdAt: new Date(Date.now() - 60 * 1000) });
+  await activateEditIntake(f.db);
+  assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+  assert.ok(await f.outbox(boundary));
+});
+
+test('backfill grace window excludes requests older than 5 minutes before activation', async () => {
+  const f = await fixture({ activate: false });
+  const old = await f.addRequest({ createdAt: new Date(Date.now() - 10 * 60 * 1000) });
+  await activateEditIntake(f.db);
+  assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
+  assert.equal(await f.outbox(old), undefined);
+});
+
 test('backfill covers only requests created after activation, and runs once per request', async () => {
   const f = await fixture({ activate: false });
   try {
