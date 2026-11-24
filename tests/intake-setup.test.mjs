@@ -1,3 +1,4 @@
+import { compiled } from './compiled-source.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
@@ -153,8 +154,8 @@ test('stored sender auth is consumed only for matching sender and exact scope', 
 });
 
 import { Readable } from 'node:stream';
-import { createSetupStartHandler } from '../src/intake-setup-handler.ts';
-import { createSetupCallbackHandler } from '../src/intake-setup-callback.ts';
+const { createSetupStartHandler } = await import(compiled('intake-setup-handler.js'));
+const { createSetupCallbackHandler } = await import(compiled('intake-setup-callback.js'));
 async function invoke(handler, {method='GET',url='/',headers={},body=''}={}) {
   const req = Object.assign(Readable.from(body ? [Buffer.from(body)] : []), {method,url,headers});
   const res = {statusCode:0,headers:{},body:'',setHeader(k,v){this.headers[k]=v;},end(s=''){this.body=s;}};
