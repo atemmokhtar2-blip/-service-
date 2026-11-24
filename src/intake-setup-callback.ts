@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { encryptToken } from "./security.ts";
-import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, consumeSetupState, exchangeCodeForTokens, storeSenderAuth, browserVerifier, clearSetupCookie } from "./intake-setup.ts";
+import { encryptToken } from "./security.js";
+import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, consumeSetupState, exchangeCodeForTokens, storeSenderAuth, browserVerifier, clearSetupCookie } from "./intake-setup.js";
 
 // Completes the one-time OAuth setup for the edit-request intake sender.
 // This is the redirect URI registered on the Google client
