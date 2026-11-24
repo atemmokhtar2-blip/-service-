@@ -52,7 +52,10 @@ per request.
   bulk-sends historic requests. The cutoff is required: with it unset or
   invalid the whole intake fails closed — nothing is enqueued, recovered,
   or sent on any path (immediate enqueue, webhook processing, cron,
-  backfill).
+  backfill). The cutoff also binds the immediate path directly: a replayed
+  or delayed request whose `created_at` predates it is never enqueued, and
+  a pre-existing outbox row whose request predates it is marked `failed`
+  (`pre_cutoff`) and never sent.
 - Email arrival is typically fast but is not guaranteed instant. The
   database, not the inbox, is authoritative.
 
