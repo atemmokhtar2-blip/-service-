@@ -88,6 +88,25 @@ CREATE TABLE IF NOT EXISTS factory_edit_intake_outbox (
   sent_at TIMESTAMPTZ
 );
 
+-- Optional one-time OAuth setup for the intake sender (disabled unless
+-- INTAKE_SETUP_ENABLED=true). States are single-use and expire after 10 minutes;
+-- factory_intake_sender_auth is a singleton holding the encrypted refresh token
+-- and the granted scope evidence. Nothing reads it until a separate reviewed change.
+CREATE TABLE IF NOT EXISTS factory_intake_setup_states (
+  state TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  consumed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS factory_intake_sender_auth (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  sender TEXT NOT NULL,
+  encrypted_refresh_token TEXT NOT NULL,
+  granted_scope TEXT NOT NULL,
+  authorized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS factory_edit_credit_ledger (
   id BIGSERIAL PRIMARY KEY,
   instance_id UUID NOT NULL REFERENCES factory_instances(id) ON DELETE CASCADE,
