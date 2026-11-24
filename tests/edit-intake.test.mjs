@@ -112,22 +112,36 @@ test('enqueue is idempotent per request and email carries no tokens or owner ide
   } finally { await f.pg.close(); }
 });
 
-test('backfill grace window covers a crashed first enqueue at the activation boundary', async () => {
+test('activation recorded with the first request timestamp recovers a crashed first enqueue', async () => {
   const f = await fixture({ activate: false });
-  // The normal boundary case: the first enabled request is created moments
-  // before activation is recorded, so its enqueue crashing must not skip it.
-  const boundary = await f.addRequest({ createdAt: new Date(Date.now() - 60 * 1000) });
-  await activateEditIntake(f.db);
+  // The boundary case: the first enabled request commits, activation records
+  // its creation time, and then the enqueue crashes. Backfill must include it.
+  const first = await f.addRequest();
+  await activateEditIntake(f.db, first);
   assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
-  assert.ok(await f.outbox(boundary));
+  assert.ok(await f.outbox(first));
 });
 
-test('backfill grace window excludes requests older than 5 minutes before activation', async () => {
+test('activation recorded with the first request timestamp excludes all earlier requests', async () => {
   const f = await fixture({ activate: false });
-  const old = await f.addRequest({ createdAt: new Date(Date.now() - 10 * 60 * 1000) });
-  await activateEditIntake(f.db);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
-  assert.equal(await f.outbox(old), undefined);
+  const before = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
+  const first = await f.addRequest();
+  await activateEditIntake(f.db, first);
+  assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+  assert.ok(await f.outbox(first));
+  assert.equal(await f.outbox(before), undefined);
+});
+
+test('activation recorded with the first request timestamp covers requests created before the record exists', async () => {
+  const f = await fixture({ activate: false });
+  // A second request created after the boundary request but before the
+  // processing pass runs is post-activation and must be recoverable too.
+  const first = await f.addRequest({ createdAt: new Date(Date.now() - 120 * 1000), status: 'completed' });
+  const second = await f.addRequest({ createdAt: new Date(Date.now() - 60 * 1000) });
+  await activateEditIntake(f.db, first);
+  assert.equal(await backfillEditIntake(f.db, CONFIG), 2);
+  assert.ok(await f.outbox(first));
+  assert.ok(await f.outbox(second));
 });
 
 test('backfill covers only requests created after activation, and runs once per request', async () => {
