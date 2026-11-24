@@ -43,9 +43,11 @@ per request.
   by a killed process becomes claimable again after 10 minutes; its attempt
   was already counted, and rows give up after 5 attempts as `failed` for
   manual review.
-- Backfill only covers requests created **after the feature's recorded
-  activation time** (first enabled run). Requests created while the feature
-  was off are never emailed, so enabling it never bulk-sends historic
+- Backfill only covers requests created **around or after the feature's
+  recorded activation time** (first enabled run): a 5-minute grace window
+  before it ensures a request whose first enqueue crashed at the boundary is
+  still recovered. Requests created while the feature was off are never
+  emailed beyond that window, so enabling it never bulk-sends historic
   requests.
 - Email arrival is typically fast but is not guaranteed instant. The
   database, not the inbox, is authoritative.
@@ -93,7 +95,7 @@ Google Account permissions if it may have leaked.
    a test instance and confirm: the Telegram admin message still arrives
    first, one outbox row reaches `sent`, and the intake inbox receives one
    email with the request UUID and XV code. Requests created before
-   activation must NOT receive emails.
+   more than 5 minutes before activation must NOT receive emails.
 3. Disable the flag again and confirm no new outbox rows are created.
 
 ## Security notes
