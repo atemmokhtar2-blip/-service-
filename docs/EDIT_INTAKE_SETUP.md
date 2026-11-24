@@ -30,9 +30,13 @@ refresh token by hand:
 - **Owner-only start.** Without the owner bearer token (at least 32 random
   bytes), no consent flow can begin. The token is compared in constant time.
 - **Server-side single-use state.** States are random 32-byte hex strings
-  stored in `factory_intake_setup_states`, valid for 10 minutes, consumed
+  stored as SHA-256 digests in `factory_intake_setup_states`, valid for 10 minutes, consumed
   atomically on first use. Unknown, expired, malformed, or replayed states
   fail; a denied consent (`?error=...`) also consumes its state.
+- **Browser binding and PKCE.** A Secure, HttpOnly, SameSite=Lax cookie binds
+  the callback to the initiating browser and carries the PKCE verifier.
+  The authorization URL carries only its S256 challenge. Missing, duplicate
+  or mismatched cookies fail before state consumption or token exchange.
 - **One-time server-side exchange.** The authorization code is exchanged
   exactly once against `https://oauth2.googleapis.com/token`. Codes and
   tokens never appear in logs, pages, or responses; error logs carry only the
@@ -40,17 +44,16 @@ refresh token by hand:
 - **Encrypted at rest.** The refresh token is never stored in plaintext.
   Re-running the flow replaces the singleton row (owner re-consent recovery);
   it never accumulates rows.
-- **Scope evidence.** The granted scope string returned by Google is stored
-  so a later review can confirm the authorization never exceeded
-  `gmail.send`.
+- **Strict scope check.** The exchange rejects absent or unexpected scopes before storage. Only the exact `gmail.send` scope is accepted.
 
 ## What enabling this does NOT do
 
 - It does not enable the intake. `EDIT_INTAKE_EMAIL_ENABLED` and the explicit
   `EDIT_INTAKE_ACTIVATED_AFTER` cutoff remain the operator's separate
-  decisions, and the intake still reads its sender credentials from
-  environment variables. Wiring the intake to consume
-  `factory_intake_sender_auth` is a separate, reviewed change.
+  decisions. With `GOOGLE_INTAKE_AUTH_SOURCE=database`, the sender reads
+  and decrypts the singleton token only during send processing. It rejects
+  sender/scope mismatches. Without this explicit selector, existing env-token
+  behavior is unchanged. Enqueueing remains database-only.
 - It does not change the request flow, the webhook, or the cron.
 
 ## Operator procedure (when the time comes)
@@ -65,7 +68,10 @@ refresh token by hand:
    sender account, and confirm the success page.
 4. Unset `INTAKE_SETUP_ENABLED` again. The stored token stays; the route
    closes.
-5. Verify `factory_intake_sender_auth.granted_scope` is exactly
+5. Select `GOOGLE_INTAKE_AUTH_SOURCE=database` for stored-token consumption.
+   Keep `EDIT_INTAKE_EMAIL_ENABLED=false` until receiver deduplication,
+   subscription, cutoff and an approved end-to-end test are ready.
+6. Verify `factory_intake_sender_auth.granted_scope` is exactly
    `https://www.googleapis.com/auth/gmail.send` before any later wiring.
 
 ## Google-side notes
