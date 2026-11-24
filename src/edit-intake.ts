@@ -38,6 +38,12 @@ export type IntakeConfig = {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  // Explicit backfill cutoff configured by the operator before enabling.
+  // Backfill only recovers requests created at or after this moment; when it
+  // is unset, backfill is inert and nothing is recovered. There is no
+  // automatic cutoff: requests created before the configured moment are
+  // never emailed, whatever the runtime ordering.
+  activatedAfter: Date | null;
 };
 
 export type IntakeRequestFields = {
@@ -61,7 +67,12 @@ export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Intak
     console.warn("factory_edit_intake_config_incomplete");
     return null;
   }
-  return { to, sender, clientId, clientSecret, refreshToken };
+  const cutoffRaw = (env.EDIT_INTAKE_ACTIVATED_AFTER ?? "").trim();
+  const cutoffMs = cutoffRaw ? Date.parse(cutoffRaw) : NaN;
+  if (cutoffRaw && Number.isNaN(cutoffMs)) {
+    console.warn("factory_edit_intake_cutoff_invalid");
+  }
+  return { to, sender, clientId, clientSecret, refreshToken, activatedAfter: Number.isNaN(cutoffMs) ? null : new Date(cutoffMs) };
 }
 
 export async function ensureEditIntakeSchema(db: Query): Promise<void> {
@@ -79,29 +90,6 @@ export async function ensureEditIntakeSchema(db: Query): Promise<void> {
       sent_at TIMESTAMPTZ
     )
   `;
-  await db`
-    CREATE TABLE IF NOT EXISTS factory_edit_intake_state (
-      id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-      activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `;
-}
-
-// Records the first moment the feature ran enabled. When the call comes from
-// the request-creation path, the request's own creation time is recorded
-// instead of NOW(): the request row commits before this runs, so recording
-// NOW() would place activation after the first enabled request, and a crash
-// in that first enqueue would then exclude the request from backfill forever.
-// With the request's own timestamp, the boundary request is included and every
-// earlier (pre-activation) request is excluded.
-export async function activateEditIntake(db: Query, referenceRequestId?: string): Promise<void> {
-  if (referenceRequestId) {
-    await db`INSERT INTO factory_edit_intake_state(id, activated_at)
-      SELECT TRUE, created_at FROM factory_edit_requests WHERE id = ${referenceRequestId}::uuid
-      ON CONFLICT (id) DO NOTHING`;
-    return;
-  }
-  await db`INSERT INTO factory_edit_intake_state(id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING`;
 }
 
 export function buildIntakeSubject(fields: IntakeRequestFields): string {
@@ -200,17 +188,21 @@ export async function enqueueEditIntake(db: Query, config: IntakeConfig, fields:
   `;
 }
 
-// Re-enqueue requests created at or after the recorded activation time that
-// have no outbox row: for example after a crash between the request commit
-// and the enqueue. Requests created before activation are never emailed.
+// Re-enqueue requests created at or after the explicitly configured cutoff
+// that have no outbox row: for example after a crash between the request
+// commit and the enqueue, in any runtime ordering. Requests created before
+// the cutoff are never emailed. With no cutoff configured, nothing is
+// recovered and this is a no-op.
 export async function backfillEditIntake(db: Query, config: IntakeConfig): Promise<number> {
+  if (!config.activatedAfter) return 0;
   const missing = await db`
     SELECT r.id, r.public_code, r.request_text, r.payment_source, i.template_key, i.bot_username
     FROM factory_edit_requests r
     JOIN factory_instances i ON i.id = r.instance_id
-    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at
     LEFT JOIN factory_edit_intake_outbox o ON o.request_id = r.id
-    WHERE o.request_id IS NULL AND r.created_at > NOW() - INTERVAL '2 days'
+    WHERE o.request_id IS NULL
+      AND r.created_at >= ${config.activatedAfter.toISOString()}::timestamptz
+      AND r.created_at > NOW() - INTERVAL '2 days'
     ORDER BY r.created_at ASC
     LIMIT ${BACKFILL_LIMIT}
   `;
@@ -313,7 +305,6 @@ export async function enqueueEditIntakeSafely(db: Query, fields: IntakeRequestFi
     const config = intakeConfigFromEnv();
     if (!config) return;
     await ensureEditIntakeSchema(db);
-    await activateEditIntake(db, fields.requestId);
     await enqueueEditIntake(db, config, fields);
   } catch (error) {
     console.error("factory_edit_intake_enqueue_failed", {
@@ -329,7 +320,6 @@ export async function processEditIntakeOutboxSafely(db: Query, budgetMs: number 
     const config = intakeConfigFromEnv();
     if (!config) return;
     await ensureEditIntakeSchema(db);
-    await activateEditIntake(db);
     const result = await processEditIntakeOutbox(db, config, undefined, budgetMs);
     if (result.sent || result.failed) {
       console.warn("factory_edit_intake_processed", { ...result, duration_ms: Date.now() - startedAt });
