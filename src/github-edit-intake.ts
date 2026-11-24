@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 // GitHub Issues mirror for confirmed factory edit requests. The factory DB is
 // authoritative; this outbox is durable and retries delivery. The target
 // repository MUST be private because issue bodies contain customer requests.
@@ -140,7 +138,6 @@ async function backfill(db: Query, config: Config): Promise<void> {
     LEFT JOIN factory_github_edit_outbox o ON o.request_id=r.id
     WHERE o.request_id IS NULL
       AND r.created_at >= ${config.activatedAfter.toISOString()}::timestamptz
-      AND r.status IN ('pending','in_progress')
     ORDER BY r.created_at ASC
     LIMIT 50
   `;
