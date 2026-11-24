@@ -67,6 +67,7 @@ function fieldsFor(requestId, overrides = {}) {
     botUsername: 'test_bot',
     paymentSource: 'free',
     requestText: 'Please change the welcome message',
+    createdAt: new Date(),
     ...overrides,
   };
 }
@@ -341,4 +342,42 @@ test('raw message rejects header injection and encodes UTF-8 subject', () => {
     () => buildRawMessage({ ...CONFIG, to: 'a@example.com\r\nBCC: x@y.z' }, 's', 'b'),
     /invalid_address_header/,
   );
+});
+
+test('immediate enqueue rejects a request created before the cutoff, even with a valid cutoff set', async () => {
+  const f = await fixture();
+  try {
+    // A replayed or delayed request whose created_at predates the activation
+    // moment is never enqueued, so it is never emailed.
+    const oldMoment = new Date(CONFIG.activatedAfter.getTime() - 1000);
+    const oldId = await f.addRequest({ createdAt: oldMoment, status: 'completed' });
+    assert.equal(await enqueueEditIntake(f.db, CONFIG, fieldsFor(oldId, { createdAt: oldMoment })), false);
+    assert.equal(await f.count(), 0);
+    // A fresh request passes the same guard.
+    const freshId = await f.addRequest();
+    assert.equal(await enqueueEditIntake(f.db, CONFIG, fieldsFor(freshId)), true);
+    assert.equal(await f.count(), 1);
+  } finally { await f.pg.close(); }
+});
+
+test('processing never sends a pre-existing outbox row whose request predates the cutoff', async () => {
+  const f = await fixture();
+  try {
+    const oldId = await f.addRequest({ createdAt: new Date(CONFIG.activatedAfter.getTime() - 3600 * 1000), status: 'completed' });
+    // Simulates a row enqueued before the cutoff existed or by a path that
+    // missed the guard.
+    await f.db`INSERT INTO factory_edit_intake_outbox(request_id, recipient, subject, body_text) VALUES (${oldId}::uuid, ${CONFIG.to}, 'OLD SUBJECT', 'old body')`;
+    const freshId = await f.addRequest();
+    await enqueueEditIntake(f.db, CONFIG, fieldsFor(freshId));
+    const calls = [];
+    const result = await processEditIntakeOutbox(f.db, CONFIG, fetcherReturning({ calls }));
+    const sendCalls = calls.filter((c) => !c.url.includes('oauth2.googleapis.com/token'));
+    assert.equal(sendCalls.length, 1);
+    assert.equal(result.sent, 1);
+    assert.equal(result.failed, 1);
+    const oldRow = await f.outbox(oldId);
+    assert.equal(oldRow.status, 'failed');
+    assert.equal(oldRow.last_error, 'pre_cutoff');
+    assert.equal((await f.outbox(freshId)).status, 'sent');
+  } finally { await f.pg.close(); }
 });
