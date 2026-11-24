@@ -13,7 +13,12 @@ function formCookie(value: string, age: number): string {
 export function createSetupStartHandler(db: (strings: TemplateStringsArray, ...values: any[]) => Promise<any[]>, env: NodeJS.ProcessEnv = process.env) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     res.setHeader("cache-control", "no-store");
-    res.setHeader("referrer-policy", "no-referrer");
+    // strict-origin-when-cross-origin (not no-referrer): under a no-referrer
+    // policy browsers degrade the Origin header on top-level form navigations
+    // to "null", which this route's strict Origin check below must reject.
+    // The page carries no sensitive URL parameters (the nonce lives in the
+    // HttpOnly cookie and hidden field), so same-origin referrers leak nothing.
+    res.setHeader("referrer-policy", "strict-origin-when-cross-origin");
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("content-security-policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const config = intakeSetupConfigFromEnv(env);
