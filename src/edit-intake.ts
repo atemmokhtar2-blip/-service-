@@ -1,3 +1,6 @@
+import { loadSenderRefreshToken } from "./intake-setup.js";
+import { decryptToken } from "./security.js";
+
 // Optional email intake for factory edit requests.
 //
 // Disabled unless EDIT_INTAKE_EMAIL_ENABLED="true". When disabled, nothing in
@@ -43,6 +46,7 @@ export type IntakeConfig = {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  authSource?: "database";
   // Explicit activation moment configured by the operator before enabling.
   // Always set: intakeConfigFromEnv refuses to produce a config without a
   // valid cutoff, so every send path (immediate enqueue, cron, backfill)
@@ -76,7 +80,8 @@ export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Intak
   const clientId = (env.GOOGLE_INTAKE_CLIENT_ID ?? "").trim();
   const clientSecret = (env.GOOGLE_INTAKE_CLIENT_SECRET ?? "").trim();
   const refreshToken = (env.GOOGLE_INTAKE_REFRESH_TOKEN ?? "").trim();
-  if (!to || !sender || !clientId || !clientSecret || !refreshToken) {
+  const authSource = env.GOOGLE_INTAKE_AUTH_SOURCE === "database" ? "database" as const : undefined;
+  if (!to || !sender || !clientId || !clientSecret || (!refreshToken && !authSource)) {
     console.warn("factory_edit_intake_config_incomplete");
     return null;
   }
@@ -93,7 +98,7 @@ export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Intak
     console.warn("factory_edit_intake_cutoff_invalid");
     return null;
   }
-  return { to, sender, clientId, clientSecret, refreshToken, activatedAfter: new Date(cutoffMs) };
+  return { to, sender, clientId, clientSecret, refreshToken, ...(authSource ? { authSource } : {}), activatedAfter: new Date(cutoffMs) };
 }
 
 export async function ensureEditIntakeSchema(db: Query): Promise<void> {
@@ -291,7 +296,10 @@ export async function processEditIntakeOutbox(
   if (!config || !config.activatedAfter) return { sent: 0, failed: 0 };
   const cutoff = config.activatedAfter.getTime();
   await backfillEditIntake(db, config);
-  const send = createIntakeSender(config, fetcher ?? fetch);
+  const senderConfig = config.authSource === "database"
+    ? { ...config, refreshToken: await loadSenderRefreshToken(db, config.sender, decryptToken) }
+    : config;
+  const send = createIntakeSender(senderConfig, fetcher ?? fetch);
   const deadline = Date.now() + budgetMs;
   const claimed = await claimEditIntakeBatch(db);
   let sent = 0;
