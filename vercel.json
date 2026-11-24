@@ -3,6 +3,15 @@
     "api/webhook.ts": {
       "maxDuration": 15,
       "memory": 1024
+    },
+    "api/intake-cron.ts": {
+      "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/intake-cron",
+      "schedule": "0 6 * * *"
+    }
+  ]
 }
