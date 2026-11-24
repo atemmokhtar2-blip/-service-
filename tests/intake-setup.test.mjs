@@ -9,7 +9,7 @@ import {
   buildConsentUrl,
   exchangeCodeForTokens,
   storeSenderAuth,
-  INTAKE_SETUP_SCOPE,
+  INTAKE_SETUP_SCOPE, browserVerifier, setupCookie, hashState, loadSenderRefreshToken, validOrigin,
 } from '../src/intake-setup.ts';
 import { encryptToken, decryptToken } from '../src/security.ts';
 
@@ -17,6 +17,7 @@ process.env.TOKEN_ENCRYPTION_KEY = 'a'.repeat(64);
 
 const ENV_OK = {
   INTAKE_SETUP_ENABLED: 'true',
+  TOKEN_ENCRYPTION_KEY: 'a'.repeat(64),
   INTAKE_SETUP_OWNER_TOKEN: 'o'.repeat(32),
   GOOGLE_INTAKE_CLIENT_ID: 'cid.apps.googleusercontent.com',
   GOOGLE_INTAKE_CLIENT_SECRET: 'csecret',
@@ -56,7 +57,7 @@ test('state is created once and consumed atomically exactly once', async () => {
 });
 
 test('consent URL carries offline access, consent prompt, scope and state', () => {
-  const url = new URL(buildConsentUrl(CONFIG, 's'.repeat(64)));
+  const url = new URL(buildConsentUrl(CONFIG, 's'.repeat(64), 'a'.repeat(64)));
   assert.equal(url.origin + url.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
   assert.equal(url.searchParams.get('client_id'), CONFIG.clientId);
   assert.equal(url.searchParams.get('redirect_uri'), CONFIG.redirectUri);
@@ -74,7 +75,7 @@ test('code exchange posts once and returns the refresh token and granted scope',
     calls.push({ url, body: init.body });
     return { ok: true, json: async () => ({ refresh_token: 'rtoken', scope: INTAKE_SETUP_SCOPE, access_token: 'at' }) };
   };
-  const result = await exchangeCodeForTokens(CONFIG, 'authcode', fetcher);
+  const result = await exchangeCodeForTokens(CONFIG, 'authcode', 'a'.repeat(64), fetcher);
   assert.equal(result.refreshToken, 'rtoken');
   assert.equal(result.grantedScope, INTAKE_SETUP_SCOPE);
   assert.equal(calls.length, 1);
@@ -89,11 +90,11 @@ test('code exchange posts once and returns the refresh token and granted scope',
 
 test('code exchange fails closed on HTTP errors, missing refresh token and bad codes', async () => {
   const httpError = async () => ({ ok: false, status: 400, json: async () => ({}) });
-  await assert.rejects(exchangeCodeForTokens(CONFIG, 'authcode', httpError), /token_exchange_http_400/);
+  await assert.rejects(exchangeCodeForTokens(CONFIG, 'authcode', 'a'.repeat(64), httpError), /token_exchange_http_400/);
   const noRefresh = async () => ({ ok: true, json: async () => ({ access_token: 'at' }) });
-  await assert.rejects(exchangeCodeForTokens(CONFIG, 'authcode', noRefresh), /token_exchange_no_refresh_token/);
-  await assert.rejects(exchangeCodeForTokens(CONFIG, '', async () => { throw new Error('must not fetch'); }), /invalid_code/);
-  await assert.rejects(exchangeCodeForTokens(CONFIG, 'a\nb', async () => { throw new Error('must not fetch'); }), /invalid_code/);
+  await assert.rejects(exchangeCodeForTokens(CONFIG, 'authcode', 'a'.repeat(64), noRefresh), /token_exchange_no_refresh_token/);
+  await assert.rejects(exchangeCodeForTokens(CONFIG, '', 'a'.repeat(64), async () => { throw new Error('must not fetch'); }), /invalid_code/);
+  await assert.rejects(exchangeCodeForTokens(CONFIG, 'a\nb', 'a'.repeat(64), async () => { throw new Error('must not fetch'); }), /invalid_code/);
 });
 
 test('sender auth stores encrypted, round-trips, and re-setup replaces the singleton row', async () => {
@@ -110,4 +111,43 @@ test('sender auth stores encrypted, round-trips, and re-setup replaces the singl
   rows = await db`SELECT * FROM factory_intake_sender_auth`;
   assert.equal(rows.length, 1, 'singleton: re-setup replaces, never accumulates');
   assert.equal(decryptToken(rows[0].encrypted_refresh_token), 'refresh-two');
+});
+
+test('browser binding rejects missing, malformed, duplicate and mismatched cookies', () => {
+  const state = 'a'.repeat(64), verifier = 'b'.repeat(64);
+  const cookie = setupCookie(state, verifier).split(';')[0];
+  assert.equal(browserVerifier(cookie, state), verifier);
+  assert.equal(browserVerifier('', state), null);
+  assert.equal(browserVerifier(cookie, 'c'.repeat(64)), null);
+  assert.equal(browserVerifier(cookie + '; ' + cookie, state), null);
+  assert.equal(browserVerifier(cookie, 'bad'), null);
+});
+test('state storage is hashed, expired states fail, concurrent use wins only once', async () => {
+  const db = await fixture();
+  const state = await createSetupState(db);
+  const rows = await db`SELECT state FROM factory_intake_setup_states`;
+  assert.equal(rows[0].state, hashState(state));
+  assert.notEqual(rows[0].state, state);
+  await db`UPDATE factory_intake_setup_states SET created_at = NOW() - INTERVAL '11 minutes'`;
+  assert.equal(await consumeSetupState(db, state), false);
+  const fresh = await createSetupState(db);
+  const results = await Promise.all([consumeSetupState(db, fresh), consumeSetupState(db, fresh)]);
+  assert.equal(results.filter(Boolean).length, 1);
+});
+test('unexpected or missing scope is rejected before tokens can be stored', async () => {
+  for (const scope of [undefined, '', INTAKE_SETUP_SCOPE + ' openid']) {
+    await assert.rejects(exchangeCodeForTokens(CONFIG, 'code', 'a'.repeat(64), async () => ({ok:true,json:async()=>({refresh_token:'rt',scope})})), /scope_rejected/);
+  }
+});
+test('origin and encryption config fail closed', () => {
+  for (const origin of ['http://example.com', 'https://u:p@example.com', 'https://example.com/a', 'https://example.com?x=1', 'https://example.com:123']) assert.equal(validOrigin(origin), false);
+  assert.equal(validOrigin('https://example.com'), true);
+  assert.equal(intakeSetupConfigFromEnv({...ENV_OK,TOKEN_ENCRYPTION_KEY:''}), null);
+});
+test('stored sender auth is consumed only for matching sender and exact scope', async () => {
+  const db = await fixture();
+  await assert.rejects(loadSenderRefreshToken(db, 'sender@example.com', decryptToken), /sender_auth_invalid/);
+  await storeSenderAuth(db, {sender:'sender@example.com',encryptedRefreshToken:encryptToken('rt'),grantedScope:INTAKE_SETUP_SCOPE});
+  assert.equal(await loadSenderRefreshToken(db, 'sender@example.com', decryptToken), 'rt');
+  await assert.rejects(loadSenderRefreshToken(db, 'other@example.com', decryptToken), /sender_auth_invalid/);
 });
