@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { sql } from "../src/db.js";
 import { intakeConfigFromEnv, ensureEditIntakeSchema, processEditIntakeOutbox } from "../src/edit-intake.js";
+import { processGitHubEditOutboxSafely } from "../src/github-edit-intake.js";
 
 // Scheduled reconciliation for the edit-request intake outbox. This bounds
 // the delay of pending sends when the factory sees no Telegram traffic: the
@@ -18,6 +19,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     await ensureEditIntakeSchema(sql);
     const result = await processEditIntakeOutbox(sql, config, undefined, 20_000);
+    await processGitHubEditOutboxSafely(sql, 20_000);
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(result));
