@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { sql } from "../../src/db.js";
 import { encryptToken } from "../../src/security.js";
-import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, consumeSetupState, exchangeCodeForTokens, storeSenderAuth } from "../../src/intake-setup.js";
+import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, consumeSetupState, exchangeCodeForTokens, storeSenderAuth, browserVerifier, clearSetupCookie } from "../../src/intake-setup.js";
 
 // Completes the one-time OAuth setup for the edit-request intake sender.
 // This is the redirect URI registered on the Google client
@@ -13,9 +13,13 @@ import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, consumeSetupState, e
 // guessed callback fails. The authorization code is exchanged once,
 // server-side; code and tokens are never logged or rendered. The refresh
 // token is stored AES-256-GCM-encrypted in factory_intake_sender_auth; the
-// intake does not read it yet (that wiring is a separate reviewed change).
+// intake reads it only with the explicit database auth selector and its
+// separate feature enablement, neither of which this callback changes.
 // Success and failure pages carry no details beyond a plain outcome.
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  res.setHeader("cache-control", "no-store");
+  res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("x-content-type-options", "nosniff");
   if (req.method !== "GET") { res.statusCode = 405; res.end("Method Not Allowed"); return; }
   const config = intakeSetupConfigFromEnv();
   if (!config) { res.statusCode = 404; res.end("Not Found"); return; }
@@ -28,6 +32,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const state = params.get("state") ?? "";
   const code = params.get("code") ?? "";
   const oauthError = params.get("error");
+  const verifier = browserVerifier(req.headers.cookie ?? "", state);
+  if (!verifier || ["state", "code", "error"].some(k => params.getAll(k).length > 1)) {
+    res.statusCode = 400; res.end("Invalid setup callback"); return;
+  }
+  res.setHeader("set-cookie", clearSetupCookie());
   try {
     await ensureIntakeSetupSchema(sql);
     // Consume the state even on an OAuth error redirect so a denied or
@@ -38,7 +47,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (oauthError || !code) {
       res.statusCode = 400; res.end("Authorization not completed"); return;
     }
-    const tokens = await exchangeCodeForTokens(config, code);
+    const tokens = await exchangeCodeForTokens(config, code, verifier);
     await storeSenderAuth(sql, {
       sender: config.sender,
       encryptedRefreshToken: encryptToken(tokens.refreshToken),
