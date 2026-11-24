@@ -12,8 +12,9 @@ The intake sends mail through the Gmail API with an OAuth2 refresh token
 the owner complete Google's consent screen once, instead of handling the
 refresh token by hand:
 
-1. `GET /api/intake-setup` with `Authorization: Bearer $INTAKE_SETUP_OWNER_TOKEN`
-   creates a single-use state and 302-redirects the browser to Google's
+1. `GET /api/intake-setup` shows a minimal owner-key password form.
+   Its same-origin POST validates a Strict browser nonce cookie and the key,
+   creates a single-use state and 303-redirects the browser to Google's
    consent screen.
 2. Google returns the browser to
    `GET /api/intake-setup/callback?state=...&code=...`, which consumes the
@@ -64,8 +65,9 @@ refresh token by hand:
    `INTAKE_SETUP_ENABLED=true`, and the `GOOGLE_INTAKE_CLIENT_ID` /
    `GOOGLE_INTAKE_CLIENT_SECRET` / `GOOGLE_INTAKE_SENDER` values for the
    sender project.
-3. Open `/api/intake-setup` with the bearer token, complete consent as the
-   sender account, and confirm the success page.
+3. Open `/api/intake-setup` in the consent browser. Fill the owner setup key
+   through secure secret handling, never chat or a URL. Submit the form,
+   complete consent as the sender account, and confirm the success page.
 4. Unset `INTAKE_SETUP_ENABLED` again. The stored token stays; the route
    closes.
 5. Select `GOOGLE_INTAKE_AUTH_SOURCE=database` for stored-token consumption.
