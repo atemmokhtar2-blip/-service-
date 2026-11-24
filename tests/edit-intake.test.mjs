@@ -6,7 +6,6 @@ import { PGlite } from '@electric-sql/pglite';
 import {
   intakeConfigFromEnv,
   ensureEditIntakeSchema,
-  activateEditIntake,
   enqueueEditIntake,
   backfillEditIntake,
   claimEditIntakeBatch,
@@ -22,9 +21,13 @@ const CONFIG = {
   clientId: 'cid',
   clientSecret: 'csecret',
   refreshToken: 'rtoken',
+  // Explicit cutoff configured by the operator before enabling; backfill only
+  // recovers requests created at or after this moment.
+  activatedAfter: new Date(Date.now() - 30 * 60 * 1000),
 };
+const CONFIG_NO_CUTOFF = { ...CONFIG, activatedAfter: null };
 
-async function fixture({ activate = true } = {}) {
+async function fixture() {
   const pg = new PGlite();
   await pg.exec(await readFile(new URL('../src/db/schema.sql', import.meta.url), 'utf8'));
   const instanceId = randomUUID();
@@ -36,7 +39,6 @@ async function fixture({ activate = true } = {}) {
     return (await pg.query(text, values)).rows;
   };
   await ensureEditIntakeSchema(db);
-  if (activate) await activateEditIntake(db);
   async function addRequest({ requestText = 'Please change the welcome message', createdAt = null, status = 'pending' } = {}) {
     const requestId = randomUUID();
     if (createdAt) {
@@ -90,7 +92,11 @@ test('disabled unless explicitly enabled, and config requires every variable', (
     GOOGLE_INTAKE_CLIENT_SECRET: CONFIG.clientSecret,
     GOOGLE_INTAKE_REFRESH_TOKEN: CONFIG.refreshToken,
   };
-  assert.deepEqual(intakeConfigFromEnv(full), CONFIG);
+  assert.deepEqual(intakeConfigFromEnv(full), { ...CONFIG, activatedAfter: null });
+  const withCutoff = { ...full, EDIT_INTAKE_ACTIVATED_AFTER: CONFIG.activatedAfter.toISOString() };
+  assert.deepEqual(intakeConfigFromEnv(withCutoff), CONFIG);
+  // An unparseable cutoff is rejected to null (backfill inert), never guessed.
+  assert.equal(intakeConfigFromEnv({ ...full, EDIT_INTAKE_ACTIVATED_AFTER: 'not-a-date' }).activatedAfter, null);
 });
 
 test('enqueue is idempotent per request and email carries no tokens or owner identity', async () => {
@@ -112,55 +118,60 @@ test('enqueue is idempotent per request and email carries no tokens or owner ide
   } finally { await f.pg.close(); }
 });
 
-test('activation recorded with the first request timestamp recovers a crashed first enqueue', async () => {
-  const f = await fixture({ activate: false });
-  // The boundary case: the first enabled request commits, activation records
-  // its creation time, and then the enqueue crashes. Backfill must include it.
-  const first = await f.addRequest();
-  await activateEditIntake(f.db, first);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
-  assert.ok(await f.outbox(first));
-});
-
-test('activation recorded with the first request timestamp excludes all earlier requests', async () => {
-  const f = await fixture({ activate: false });
-  const before = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
-  const first = await f.addRequest();
-  await activateEditIntake(f.db, first);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
-  assert.ok(await f.outbox(first));
-  assert.equal(await f.outbox(before), undefined);
-});
-
-test('activation recorded with the first request timestamp covers requests created before the record exists', async () => {
-  const f = await fixture({ activate: false });
-  // A second request created after the boundary request but before the
-  // processing pass runs is post-activation and must be recoverable too.
-  const first = await f.addRequest({ createdAt: new Date(Date.now() - 120 * 1000), status: 'completed' });
-  const second = await f.addRequest({ createdAt: new Date(Date.now() - 60 * 1000) });
-  await activateEditIntake(f.db, first);
-  assert.equal(await backfillEditIntake(f.db, CONFIG), 2);
-  assert.ok(await f.outbox(first));
-  assert.ok(await f.outbox(second));
-});
-
-test('backfill covers only requests created after activation, and runs once per request', async () => {
-  const f = await fixture({ activate: false });
+test('backfill covers only requests created at/after the configured cutoff, and runs once per request', async () => {
+  const f = await fixture();
   try {
-    const beforeActivation = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
-    await activateEditIntake(f.db);
-    const afterActivation = await f.addRequest();
+    const beforeCutoff = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'completed' });
+    const afterCutoff = await f.addRequest();
     assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
     assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
     assert.equal(await f.count(), 1);
-    assert.ok(await f.outbox(afterActivation));
-    assert.equal(await f.outbox(beforeActivation), undefined);
-    // Without any activation record at all, nothing is backfilled.
-    const g = await fixture({ activate: false });
+    assert.ok(await f.outbox(afterCutoff));
+    assert.equal(await f.outbox(beforeCutoff), undefined);
+    // Without a configured cutoff, nothing is recovered even when a request
+    // created after enabling is missing its outbox row (crashed enqueue).
+    const g = await fixture();
     try {
       await g.addRequest();
-      assert.equal(await backfillEditIntake(g.db, CONFIG), 0);
+      assert.equal(await backfillEditIntake(g.db, CONFIG_NO_CUTOFF), 0);
     } finally { await g.pg.close(); }
+  } finally { await f.pg.close(); }
+});
+
+test('a request created exactly at the cutoff is included', async () => {
+  const f = await fixture();
+  try {
+    const at = await f.addRequest({ createdAt: CONFIG.activatedAfter });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+    assert.ok(await f.outbox(at));
+  } finally { await f.pg.close(); }
+});
+
+test('ordering failure: crashed first enqueue then a second request never loses the first', async () => {
+  const f = await fixture();
+  try {
+    // R1 commits, its enqueue crashes (no outbox row), then R2 commits. The
+    // boundary is the configured cutoff, not anything derived from runtime
+    // ordering, so R1 is recovered regardless of R2.
+    const r1 = await f.addRequest({ createdAt: new Date(Date.now() - 10 * 60 * 1000), status: 'completed' });
+    const r2 = await f.addRequest({ createdAt: new Date(Date.now() - 5 * 60 * 1000) });
+    const before = await f.addRequest({ createdAt: new Date(Date.now() - 3600 * 1000), status: 'rejected' });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 2);
+    assert.ok(await f.outbox(r1));
+    assert.ok(await f.outbox(r2));
+    assert.equal(await f.outbox(before), undefined);
+  } finally { await f.pg.close(); }
+});
+
+test('ordering failure: a pass running before any request cannot move the boundary', async () => {
+  const f = await fixture();
+  try {
+    // A cron/webhook pass runs first (no requests yet); later requests are
+    // still bounded only by the configured cutoff.
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 0);
+    const r1 = await f.addRequest({ createdAt: new Date(Date.now() - 5 * 60 * 1000) });
+    assert.equal(await backfillEditIntake(f.db, CONFIG), 1);
+    assert.ok(await f.outbox(r1));
   } finally { await f.pg.close(); }
 });
 
