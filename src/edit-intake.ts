@@ -87,8 +87,11 @@ export async function ensureEditIntakeSchema(db: Query): Promise<void> {
   `;
 }
 
-// Records the first moment the feature ran enabled. Backfill never emails
-// requests created before this point.
+// Records the first moment the feature ran enabled. Backfill applies a grace
+// window before this point (see backfillEditIntake): the first enabled call
+// happens right after the first enabled request is created, so a strict
+// activation boundary would permanently skip a request whose first enqueue
+// crashed.
 export async function activateEditIntake(db: Query): Promise<void> {
   await db`INSERT INTO factory_edit_intake_state(id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING`;
 }
@@ -189,15 +192,18 @@ export async function enqueueEditIntake(db: Query, config: IntakeConfig, fields:
   `;
 }
 
-// Re-enqueue requests created after activation that have no outbox row: for
-// example after a crash between the request commit and the enqueue. Requests
-// created before activation are never emailed.
+// Re-enqueue requests that have no outbox row: for example after a crash
+// between the request commit and the enqueue. The lower bound is the recorded
+// activation time minus a 5-minute grace window, so a request created just
+// before the first enabled call (the normal boundary case) is still recovered.
+// A request created up to 5 minutes before activation can be admitted;
+// anything older is never emailed.
 export async function backfillEditIntake(db: Query, config: IntakeConfig): Promise<number> {
   const missing = await db`
     SELECT r.id, r.public_code, r.request_text, r.payment_source, i.template_key, i.bot_username
     FROM factory_edit_requests r
     JOIN factory_instances i ON i.id = r.instance_id
-    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at
+    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at - INTERVAL '5 minutes'
     LEFT JOIN factory_edit_intake_outbox o ON o.request_id = r.id
     WHERE o.request_id IS NULL AND r.created_at > NOW() - INTERVAL '2 days'
     ORDER BY r.created_at ASC
@@ -329,4 +335,4 @@ export async function processEditIntakeOutboxSafely(db: Query, budgetMs: number 
       duration_ms: Date.now() - startedAt,
     });
   }
-      }
+}
