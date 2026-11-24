@@ -11,12 +11,14 @@
 // deduplicate by the request UUID carried in every message. The reverse loss
 // is covered: the outbox row survives the crash and is retried by later
 // webhook calls, by the daily cron route (api/intake-cron.ts), and by a
-// backfill that re-enqueues requests created after activation that have no
-// outbox row.
+// backfill that re-enqueues requests created at or after the configured
+// activation moment that have no outbox row.
 //
-// Backfill is bounded by the activation timestamp recorded the first time the
-// feature runs enabled: requests created before activation are never emailed,
-// so enabling the feature never bulk-sends historic requests.
+// The activation moment is explicit: EDIT_INTAKE_ACTIVATED_AFTER must hold a
+// valid ISO 8601 timestamp chosen by the operator before enabling. Requests
+// created before it are never emailed, so enabling never bulk-sends historic
+// requests. When it is missing or invalid the whole feature fails closed: no
+// enqueue, no backfill, no send.
 //
 // factory_edit_requests remains the source of truth. The email is a
 // notification copy only; it never carries bot tokens or owner identifiers.
@@ -38,11 +40,13 @@ export type IntakeConfig = {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
-  // Explicit backfill cutoff configured by the operator before enabling.
-  // Backfill only recovers requests created at or after this moment; when it
-  // is unset, backfill is inert and nothing is recovered. There is no
-  // automatic cutoff: requests created before the configured moment are
-  // never emailed, whatever the runtime ordering.
+  // Explicit activation moment configured by the operator before enabling.
+  // Always set: intakeConfigFromEnv refuses to produce a config without a
+  // valid cutoff, so every send path (immediate enqueue, cron, backfill)
+  // fails closed when it is missing or invalid. Backfill only recovers
+  // requests created at or after this moment; there is no automatic cutoff,
+  // so requests created before it are never emailed, whatever the runtime
+  // ordering.
   activatedAfter: Date | null;
 };
 
@@ -67,12 +71,20 @@ export function intakeConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Intak
     console.warn("factory_edit_intake_config_incomplete");
     return null;
   }
+  // Fail closed on the cutoff: without a valid explicit activation moment
+  // there is no boundary separating pre-activation requests, so nothing may
+  // enqueue or send at all, on any path.
   const cutoffRaw = (env.EDIT_INTAKE_ACTIVATED_AFTER ?? "").trim();
-  const cutoffMs = cutoffRaw ? Date.parse(cutoffRaw) : NaN;
-  if (cutoffRaw && Number.isNaN(cutoffMs)) {
-    console.warn("factory_edit_intake_cutoff_invalid");
+  if (!cutoffRaw) {
+    console.warn("factory_edit_intake_cutoff_missing");
+    return null;
   }
-  return { to, sender, clientId, clientSecret, refreshToken, activatedAfter: Number.isNaN(cutoffMs) ? null : new Date(cutoffMs) };
+  const cutoffMs = Date.parse(cutoffRaw);
+  if (Number.isNaN(cutoffMs)) {
+    console.warn("factory_edit_intake_cutoff_invalid");
+    return null;
+  }
+  return { to, sender, clientId, clientSecret, refreshToken, activatedAfter: new Date(cutoffMs) };
 }
 
 export async function ensureEditIntakeSchema(db: Query): Promise<void> {
