@@ -151,3 +151,44 @@ test('stored sender auth is consumed only for matching sender and exact scope', 
   assert.equal(await loadSenderRefreshToken(db, 'sender@example.com', decryptToken), 'rt');
   await assert.rejects(loadSenderRefreshToken(db, 'other@example.com', decryptToken), /sender_auth_invalid/);
 });
+
+import { Readable } from 'node:stream';
+import { createSetupStartHandler } from '../src/intake-setup-handler.ts';
+import { createSetupCallbackHandler } from '../src/intake-setup-callback.ts';
+async function invoke(handler, {method='GET',url='/',headers={},body=''}={}) {
+  const req = Object.assign(Readable.from(body ? [Buffer.from(body)] : []), {method,url,headers});
+  const res = {statusCode:0,headers:{},body:'',setHeader(k,v){this.headers[k]=v;},end(s=''){this.body=s;}};
+  await handler(req,res); return res;
+}
+test('HTTP owner form: disabled fails closed; GET reveals no key; wrong origin and key fail without DB', async () => {
+  let calls=0; const db=async()=>{calls++;return [];};
+  assert.equal((await invoke(createSetupStartHandler(db,{}))).statusCode,404);
+  const handler=createSetupStartHandler(db,ENV_OK);
+  const page=await invoke(handler);
+  assert.equal(page.statusCode,200);
+  assert.ok(!page.body.includes(ENV_OK.INTAKE_SETUP_OWNER_TOKEN));
+  assert.ok(page.headers['set-cookie'].includes('HttpOnly; Secure; SameSite=Strict'));
+  assert.equal((await invoke(handler,{method:'POST',headers:{origin:'https://evil.example'}})).statusCode,403);
+  const nonce=page.body.match(/name="nonce" value="([a-f0-9]+)"/)[1];
+  const headers={origin:'https://factory.example.com','content-type':'application/x-www-form-urlencoded',cookie:page.headers['set-cookie'].split(';')[0]};
+  const rejected=await invoke(handler,{method:'POST',headers,body:new URLSearchParams({nonce,owner_token:'wrong'}).toString()});
+  assert.equal(rejected.statusCode,401); assert.equal(calls,0);
+});
+test('HTTP approved owner start redirects with browser cookie and PKCE, never the owner key', async () => {
+  const db=await fixture(),handler=createSetupStartHandler(db,ENV_OK);
+  const page=await invoke(handler),nonce=page.body.match(/name="nonce" value="([a-f0-9]+)"/)[1];
+  const res=await invoke(handler,{method:'POST',headers:{origin:'https://factory.example.com','content-type':'application/x-www-form-urlencoded',cookie:page.headers['set-cookie'].split(';')[0]},body:new URLSearchParams({nonce,owner_token:ENV_OK.INTAKE_SETUP_OWNER_TOKEN}).toString()});
+  assert.equal(res.statusCode,303);
+  const target=new URL(res.headers.location);
+  assert.equal(target.searchParams.get('code_challenge_method'),'S256');
+  assert.ok(!res.headers.location.includes(ENV_OK.INTAKE_SETUP_OWNER_TOKEN));
+  assert.equal(res.headers['set-cookie'].length,2);
+});
+test('HTTP callback denies wrong browser before DB/fetch; denied consent consumes state; replay fails', async () => {
+  let calls=0; const bad=createSetupCallbackHandler(async()=>{calls++;return [];},ENV_OK,async()=>{throw Error('must not fetch');});
+  assert.equal((await invoke(bad,{url:'/?state='+ 'a'.repeat(64)+'&code=x'})).statusCode,400); assert.equal(calls,0);
+  const db=await fixture(),state=await createSetupState(db),cookie=setupCookie(state,'b'.repeat(64)).split(';')[0];
+  const handler=createSetupCallbackHandler(db,ENV_OK,async()=>{throw Error('must not fetch');});
+  assert.equal((await invoke(handler,{url:'/?state='+state+'&error=access_denied',headers:{cookie}})).body,'Authorization not completed');
+  assert.equal((await invoke(handler,{url:'/?state='+state+'&code=x',headers:{cookie}})).body,'Invalid or expired setup state');
+});
