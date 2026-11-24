@@ -15,7 +15,10 @@ refresh token by hand:
 1. `GET /api/intake-setup` shows a minimal owner-key password form.
    Its same-origin POST validates a Strict browser nonce cookie and the key,
    creates a single-use state and 303-redirects the browser to Google's
-   consent screen.
+   consent screen. A request with `Accept: application/json` instead
+   receives 200 JSON `{ "location": ... }` after the identical checks, for a
+   same-origin fetch that then navigates top-level; rejection paths are
+   unchanged and create no state.
 2. Google returns the browser to
    `GET /api/intake-setup/callback?state=...&code=...`, which consumes the
    state, exchanges the code exactly once, and stores the refresh token

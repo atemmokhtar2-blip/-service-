@@ -51,8 +51,19 @@ export function createSetupStartHandler(db: (strings: TemplateStringsArray, ...v
       const state = await createSetupState(db);
       const verifier = randomBytes(32).toString("hex");
       res.setHeader("set-cookie", [formCookie("", 0), setupCookie(state, verifier)]);
+      const consentUrl = buildConsentUrl(config, state, verifier);
+      // Authenticated JSON mode for same-origin fetch: identical checks above,
+      // identical state/PKCE/cookies; the consent location goes only to a
+      // caller that passed them - the same party a 303 Location would reach.
+      // The caller performs its own top-level navigation to it.
+      if ((req.headers.accept ?? "").includes("application/json")) {
+        res.setHeader("content-type", "application/json");
+        res.statusCode = 200;
+        res.end(JSON.stringify({ location: consentUrl }));
+        return;
+      }
       res.statusCode = 303;
-      res.setHeader("location", buildConsentUrl(config, state, verifier));
+      res.setHeader("location", consentUrl);
       res.end();
     } catch (error) {
       console.error("factory_intake_setup_start_failed", { errorType: error instanceof Error ? error.name : "unknown" });

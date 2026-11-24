@@ -191,6 +191,24 @@ test('HTTP approved owner start redirects with browser cookie and PKCE, never th
   assert.ok(!res.headers.location.includes(ENV_OK.INTAKE_SETUP_OWNER_TOKEN));
   assert.equal(res.headers['set-cookie'].length,2);
 });
+test('HTTP approved owner start JSON mode: same auth, state, cookies, PKCE; rejection creates no state', async () => {
+  const queries=[]; const db=async(strings,...values)=>{queries.push(strings.join('?'));return [];};
+  const handler=createSetupStartHandler(db,ENV_OK);
+  const page=await invoke(handler),nonce=page.body.match(/name="nonce" value="([a-f0-9]+)"/)[1];
+  const cookie=page.headers['set-cookie'].split(';')[0];
+  const post=(accept,token)=>invoke(handler,{method:'POST',headers:{origin:'https://factory.example.com','content-type':'application/x-www-form-urlencoded',cookie,accept},body:new URLSearchParams({nonce,owner_token:token}).toString()});
+  const rejected=await post('application/json','wrong');
+  assert.equal(rejected.statusCode,401); assert.equal(rejected.headers['set-cookie'],undefined);
+  assert.equal(queries.length,0);
+  const res=await post('application/json',ENV_OK.INTAKE_SETUP_OWNER_TOKEN);
+  assert.equal(res.statusCode,200);
+  const url=JSON.parse(res.body).location;
+  const target=new URL(url);
+  assert.equal(target.searchParams.get('code_challenge_method'),'S256');
+  assert.ok(!url.includes(ENV_OK.INTAKE_SETUP_OWNER_TOKEN));
+  assert.equal(res.headers['set-cookie'].length,2);
+  assert.equal(queries.filter(q=>q.includes('INSERT INTO factory_intake_setup_states')).length,1);
+});
 test('HTTP callback denies wrong browser before DB/fetch; denied consent consumes state; replay fails', async () => {
   let calls=0; const bad=createSetupCallbackHandler(async()=>{calls++;return [];},ENV_OK,async()=>{throw Error('must not fetch');});
   assert.equal((await invoke(bad,{url:'/?state='+ 'a'.repeat(64)+'&code=x'})).statusCode,400); assert.equal(calls,0);
