@@ -7,6 +7,7 @@ import {
   intakeConfigFromEnv,
   ensureEditIntakeSchema,
   enqueueEditIntake,
+  enqueueEditIntakeSafely,
   backfillEditIntake,
   claimEditIntakeBatch,
   processEditIntakeOutbox,
@@ -92,11 +93,54 @@ test('disabled unless explicitly enabled, and config requires every variable', (
     GOOGLE_INTAKE_CLIENT_SECRET: CONFIG.clientSecret,
     GOOGLE_INTAKE_REFRESH_TOKEN: CONFIG.refreshToken,
   };
-  assert.deepEqual(intakeConfigFromEnv(full), { ...CONFIG, activatedAfter: null });
+  // No cutoff configured: the config itself is refused, so every send path
+  // (immediate enqueue, webhook processing, cron, backfill) fails closed.
+  assert.equal(intakeConfigFromEnv(full), null);
   const withCutoff = { ...full, EDIT_INTAKE_ACTIVATED_AFTER: CONFIG.activatedAfter.toISOString() };
   assert.deepEqual(intakeConfigFromEnv(withCutoff), CONFIG);
-  // An unparseable cutoff is rejected to null (backfill inert), never guessed.
-  assert.equal(intakeConfigFromEnv({ ...full, EDIT_INTAKE_ACTIVATED_AFTER: 'not-a-date' }).activatedAfter, null);
+  // An unparseable cutoff also fails closed; it is never guessed or derived.
+  assert.equal(intakeConfigFromEnv({ ...full, EDIT_INTAKE_ACTIVATED_AFTER: 'not-a-date' }), null);
+});
+
+test('missing or invalid cutoff fails closed on the immediate enqueue path', async () => {
+  const f = await fixture();
+  const KEYS = [
+    'EDIT_INTAKE_EMAIL_ENABLED', 'EDIT_INTAKE_EMAIL_TO', 'GOOGLE_INTAKE_SENDER',
+    'GOOGLE_INTAKE_CLIENT_ID', 'GOOGLE_INTAKE_CLIENT_SECRET', 'GOOGLE_INTAKE_REFRESH_TOKEN',
+    'EDIT_INTAKE_ACTIVATED_AFTER',
+  ];
+  const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  const restore = () => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  };
+  try {
+    Object.assign(process.env, {
+      EDIT_INTAKE_EMAIL_ENABLED: 'true',
+      EDIT_INTAKE_EMAIL_TO: CONFIG.to,
+      GOOGLE_INTAKE_SENDER: CONFIG.sender,
+      GOOGLE_INTAKE_CLIENT_ID: CONFIG.clientId,
+      GOOGLE_INTAKE_CLIENT_SECRET: CONFIG.clientSecret,
+      GOOGLE_INTAKE_REFRESH_TOKEN: CONFIG.refreshToken,
+    });
+    // Enabled with every credential but no cutoff: nothing is enqueued.
+    delete process.env.EDIT_INTAKE_ACTIVATED_AFTER;
+    await enqueueEditIntakeSafely(f.db, fieldsFor(await f.addRequest({ status: 'completed' })));
+    assert.equal(await f.count(), 0);
+    // Invalid cutoff: same fail-closed behavior, never guessed.
+    process.env.EDIT_INTAKE_ACTIVATED_AFTER = 'not-a-date';
+    const blocked = await f.addRequest({ status: 'completed' });
+    await enqueueEditIntakeSafely(f.db, fieldsFor(blocked));
+    assert.equal(await f.count(), 0);
+    // A valid explicit cutoff reopens the same path.
+    process.env.EDIT_INTAKE_ACTIVATED_AFTER = CONFIG.activatedAfter.toISOString();
+    await enqueueEditIntakeSafely(f.db, fieldsFor(blocked));
+    assert.equal(await f.count(), 1);
+  } finally {
+    restore();
+    await f.pg.close();
+  }
 });
 
 test('enqueue is idempotent per request and email carries no tokens or owner identity', async () => {
