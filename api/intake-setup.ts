@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomBytes } from "node:crypto";
 import { sql } from "../src/db.js";
-import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, createSetupState, buildConsentUrl } from "../src/intake-setup.js";
+import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, createSetupState, buildConsentUrl, setupCookie } from "../src/intake-setup.js";
 
 // Starts the one-time OAuth setup for the edit-request intake sender.
 //
@@ -15,6 +15,8 @@ import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, createSetupState, bu
 // This route never enables the intake itself and never touches customer
 // traffic; see docs/EDIT_INTAKE_SETUP.md.
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  res.setHeader("cache-control", "no-store");
+  res.setHeader("referrer-policy", "no-referrer");
   if (req.method !== "GET") { res.statusCode = 405; res.end("Method Not Allowed"); return; }
   const config = intakeSetupConfigFromEnv();
   if (!config) { res.statusCode = 404; res.end("Not Found"); return; }
@@ -28,8 +30,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     await ensureIntakeSetupSchema(sql);
     const state = await createSetupState(sql);
+    const verifier = randomBytes(32).toString("hex");
+    res.setHeader("set-cookie", setupCookie(state, verifier));
     res.statusCode = 302;
-    res.setHeader("location", buildConsentUrl(config, state));
+    res.setHeader("location", buildConsentUrl(config, state, verifier));
     res.setHeader("cache-control", "no-store");
     res.end();
   } catch (error) {
