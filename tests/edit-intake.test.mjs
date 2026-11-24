@@ -1,9 +1,10 @@
+import { compiled } from './compiled-source.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
-import {
+const {
   intakeConfigFromEnv,
   ensureEditIntakeSchema,
   enqueueEditIntake,
@@ -14,7 +15,7 @@ import {
   buildIntakeSubject,
   buildIntakeBody,
   buildRawMessage,
-} from '../src/edit-intake.ts';
+} = await import(compiled('edit-intake.js'));
 
 const CONFIG = {
   to: 'intake@example.com',
