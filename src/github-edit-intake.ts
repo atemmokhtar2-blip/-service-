@@ -6,8 +6,8 @@ type Config = { repo: string; token: string; activatedAfter: Date };
 type Fetcher = typeof fetch;
 
 const MAX_ATTEMPTS = 5;
-const BATCH_SIZE = 2;
-const REQUEST_TIMEOUT_MS = 4_000;
+const BATCH_SIZE = 1;
+const REQUEST_TIMEOUT_MS = 2_000;
 const DEFAULT_BUDGET_MS = 5_000;
 
 export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config | null {
@@ -150,7 +150,7 @@ async function backfill(db: Query, config: Config): Promise<void> {
   }
 }
 
-async function claimBatch(db: Query): Promise<any[]> {
+async function claimBatch(db: Query, limit: number = BATCH_SIZE): Promise<any[]> {
   return db`
     WITH picked AS (
       SELECT o.request_id
@@ -159,7 +159,7 @@ async function claimBatch(db: Query): Promise<any[]> {
          OR (o.status='sending' AND o.attempts < ${MAX_ATTEMPTS}
              AND o.updated_at < NOW() - INTERVAL '10 minutes')
       ORDER BY o.created_at ASC
-      LIMIT ${BATCH_SIZE}
+      LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
     UPDATE factory_github_edit_outbox o
@@ -175,11 +175,12 @@ export async function processGitHubEditOutbox(
   config: Config | null,
   fetcher: Fetcher = fetch,
   budgetMs: number = DEFAULT_BUDGET_MS,
+  batchSize: number = BATCH_SIZE,
 ): Promise<{ sent: number; failed: number }> {
   if (!config) return { sent: 0, failed: 0 };
   await ensureGitHubEditOutboxSchema(db);
   await backfill(db, config);
-  const claimed = await claimBatch(db);
+  const claimed = await claimBatch(db, batchSize);
   const deadline = Date.now() + budgetMs;
   let sent = 0;
   let failed = 0;
@@ -225,12 +226,12 @@ export async function processGitHubEditOutbox(
   return { sent, failed };
 }
 
-export async function processGitHubEditOutboxSafely(db: Query, budgetMs = DEFAULT_BUDGET_MS): Promise<void> {
+export async function processGitHubEditOutboxSafely(db: Query, budgetMs = DEFAULT_BUDGET_MS, batchSize = BATCH_SIZE): Promise<void> {
   const startedAt = Date.now();
   try {
     const config = githubEditConfigFromEnv();
     if (!config) return;
-    const result = await processGitHubEditOutbox(db, config, fetch, budgetMs);
+    const result = await processGitHubEditOutbox(db, config, fetch, budgetMs, batchSize);
     if (result.sent || result.failed) {
       console.warn("factory_github_edit_outbox_processed", { ...result, duration_ms: Date.now() - startedAt });
     }
