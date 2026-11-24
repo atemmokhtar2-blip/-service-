@@ -6,6 +6,12 @@
     },
     "api/intake-cron.ts": {
       "maxDuration": 30
+    },
+    "api/intake-setup.ts": {
+      "maxDuration": 15
+    },
+    "api/intake-setup/callback.ts": {
+      "maxDuration": 30
     }
   },
   "crons": [
