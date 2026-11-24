@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { sql } from "./db.js";
 import { consumeEditCredit, transitionEditRequest } from "./edit-credit-store.js";
+import { enqueueEditIntakeSafely } from "./edit-intake.js";
 import { editMessageText, sendMessage, type InlineButton, type TelegramUser } from "./telegram.js";
 
 const token = () => process.env.FACTORY_BOT_TOKEN ?? "";
@@ -167,18 +168,30 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
   const admins = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").map((v) => Number(v.trim())).filter((v) => Number.isSafeInteger(v) && v > 0);
   if (!admins.length) {
     console.error("factory_edit_admins_not_configured", { requestId });
-    return;
+  } else {
+    const owner = [user.first_name, user.username ? `@${user.username}` : null].filter(Boolean).join(' · ') || String(user.id);
+    const message = `<b>طلب تعديل جديد</b>\n\nالنسخة: <code>${code}</code>\nالقالب: <b>${escapeHtml(String(draft.template_key))}</b>\nالبوت: ${escapeHtml(String(draft.bot_username ? "@" + draft.bot_username : "غير محدد"))}\nالمالك: ${escapeHtml(owner)}\nTelegram ID: <code>${user.id}</code>\nمصدر الرصيد: <b>${paymentSource === "free" ? "مجاني" : "مدفوع"}</b>\nرقم الطلب: <code>${requestId}</code>\n\n<b>المطلوب:</b>\n${escapeHtml(String(draft.request_text))}`;
+    const keyboard: InlineButton[][] = [
+      [{ text: "بدء التنفيذ", callback_data: `edit_admin:in_progress:${requestId}`, style: "primary" }],
+      [{ text: "اكتمل التعديل", callback_data: `edit_admin:completed:${requestId}`, style: "success" }, { text: "رفض الطلب", callback_data: `edit_admin:rejected:${requestId}`, style: "danger" }],
+    ];
+    for (const adminId of admins) {
+      try { await sendMessage(token(), adminId, message, keyboard); }
+      catch (error) { console.error("factory_edit_admin_delivery_failed", { requestId, adminId, errorType: error instanceof Error ? error.name : "unknown" }); }
+    }
   }
-  const owner = [user.first_name, user.username ? `@${user.username}` : null].filter(Boolean).join(' · ') || String(user.id);
-  const message = `<b>طلب تعديل جديد</b>\n\nالنسخة: <code>${code}</code>\nالقالب: <b>${escapeHtml(String(draft.template_key))}</b>\nالبوت: ${escapeHtml(String(draft.bot_username ? "@" + draft.bot_username : "غير محدد"))}\nالمالك: ${escapeHtml(owner)}\nTelegram ID: <code>${user.id}</code>\nمصدر الرصيد: <b>${paymentSource === "free" ? "مجاني" : "مدفوع"}</b>\nرقم الطلب: <code>${requestId}</code>\n\n<b>المطلوب:</b>\n${escapeHtml(String(draft.request_text))}`;
-  const keyboard: InlineButton[][] = [
-    [{ text: "بدء التنفيذ", callback_data: `edit_admin:in_progress:${requestId}`, style: "primary" }],
-    [{ text: "اكتمل التعديل", callback_data: `edit_admin:completed:${requestId}`, style: "success" }, { text: "رفض الطلب", callback_data: `edit_admin:rejected:${requestId}`, style: "danger" }],
-  ];
-  for (const adminId of admins) {
-    try { await sendMessage(token(), adminId, message, keyboard); }
-    catch (error) { console.error("factory_edit_admin_delivery_failed", { requestId, adminId, errorType: error instanceof Error ? error.name : "unknown" }); }
-  }
+  // Optional intake email copy. Runs only when EDIT_INTAKE_EMAIL_ENABLED is
+  // set. It is a single guarded database insert AFTER all Telegram messages,
+  // so it adds no network calls to the customer/admin path; the actual email
+  // send happens in the webhook's post-processing pass and the cron route.
+  await enqueueEditIntakeSafely(sql, {
+    requestId,
+    publicCode: code,
+    templateKey: String(draft.template_key),
+    botUsername: draft.bot_username ? String(draft.bot_username) : null,
+    paymentSource,
+    requestText: String(draft.request_text),
+  });
 }
 
 export async function handleAdminEditAction(admin: TelegramUser, chatId: number, action: string, requestId: string): Promise<void> {
