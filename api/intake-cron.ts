@@ -21,7 +21,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       await ensureEditIntakeSchema(sql);
       email = await processEditIntakeOutbox(sql, config, undefined, 10_000);
     }
-    await processGitHubEditOutboxSafely(sql, 15_000);
+    await processGitHubEditOutboxSafely(sql, 15_000, 2);
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ email, github: "processed" }));
