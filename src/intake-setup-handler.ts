@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual, randomBytes } from "node:crypto";
-import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, createSetupState, buildConsentUrl, setupCookie } from "./intake-setup.ts";
+import { intakeSetupConfigFromEnv, ensureIntakeSetupSchema, createSetupState, buildConsentUrl, setupCookie } from "./intake-setup.js";
 
 const FORM_COOKIE = "__Secure-intake_form";
 function same(a: string, b: string): boolean {
