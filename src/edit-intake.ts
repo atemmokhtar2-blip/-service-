@@ -87,12 +87,20 @@ export async function ensureEditIntakeSchema(db: Query): Promise<void> {
   `;
 }
 
-// Records the first moment the feature ran enabled. Backfill applies a grace
-// window before this point (see backfillEditIntake): the first enabled call
-// happens right after the first enabled request is created, so a strict
-// activation boundary would permanently skip a request whose first enqueue
-// crashed.
-export async function activateEditIntake(db: Query): Promise<void> {
+// Records the first moment the feature ran enabled. When the call comes from
+// the request-creation path, the request's own creation time is recorded
+// instead of NOW(): the request row commits before this runs, so recording
+// NOW() would place activation after the first enabled request, and a crash
+// in that first enqueue would then exclude the request from backfill forever.
+// With the request's own timestamp, the boundary request is included and every
+// earlier (pre-activation) request is excluded.
+export async function activateEditIntake(db: Query, referenceRequestId?: string): Promise<void> {
+  if (referenceRequestId) {
+    await db`INSERT INTO factory_edit_intake_state(id, activated_at)
+      SELECT TRUE, created_at FROM factory_edit_requests WHERE id = ${referenceRequestId}::uuid
+      ON CONFLICT (id) DO NOTHING`;
+    return;
+  }
   await db`INSERT INTO factory_edit_intake_state(id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING`;
 }
 
@@ -192,18 +200,15 @@ export async function enqueueEditIntake(db: Query, config: IntakeConfig, fields:
   `;
 }
 
-// Re-enqueue requests that have no outbox row: for example after a crash
-// between the request commit and the enqueue. The lower bound is the recorded
-// activation time minus a 5-minute grace window, so a request created just
-// before the first enabled call (the normal boundary case) is still recovered.
-// A request created up to 5 minutes before activation can be admitted;
-// anything older is never emailed.
+// Re-enqueue requests created at or after the recorded activation time that
+// have no outbox row: for example after a crash between the request commit
+// and the enqueue. Requests created before activation are never emailed.
 export async function backfillEditIntake(db: Query, config: IntakeConfig): Promise<number> {
   const missing = await db`
     SELECT r.id, r.public_code, r.request_text, r.payment_source, i.template_key, i.bot_username
     FROM factory_edit_requests r
     JOIN factory_instances i ON i.id = r.instance_id
-    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at - INTERVAL '5 minutes'
+    JOIN factory_edit_intake_state s ON s.id = TRUE AND r.created_at >= s.activated_at
     LEFT JOIN factory_edit_intake_outbox o ON o.request_id = r.id
     WHERE o.request_id IS NULL AND r.created_at > NOW() - INTERVAL '2 days'
     ORDER BY r.created_at ASC
@@ -308,7 +313,7 @@ export async function enqueueEditIntakeSafely(db: Query, fields: IntakeRequestFi
     const config = intakeConfigFromEnv();
     if (!config) return;
     await ensureEditIntakeSchema(db);
-    await activateEditIntake(db);
+    await activateEditIntake(db, fields.requestId);
     await enqueueEditIntake(db, config, fields);
   } catch (error) {
     console.error("factory_edit_intake_enqueue_failed", {
