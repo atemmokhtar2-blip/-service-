@@ -169,7 +169,13 @@ test('HTTP owner form: disabled fails closed; GET reveals no key; wrong origin a
   assert.equal(page.statusCode,200);
   assert.ok(!page.body.includes(ENV_OK.INTAKE_SETUP_OWNER_TOKEN));
   assert.ok(page.headers['set-cookie'].includes('HttpOnly; Secure; SameSite=Strict'));
+  // The form page must allow browsers to send the full Origin on the
+  // same-origin POST navigation; a no-referrer policy degrades it to "null".
+  assert.equal(page.headers['referrer-policy'],'strict-origin-when-cross-origin');
   assert.equal((await invoke(handler,{method:'POST',headers:{origin:'https://evil.example'}})).statusCode,403);
+  // A degraded/absent Origin is still rejected: the strict check is unchanged.
+  assert.equal((await invoke(handler,{method:'POST',headers:{origin:'null'}})).statusCode,403);
+  assert.equal((await invoke(handler,{method:'POST',headers:{}})).statusCode,403);
   const nonce=page.body.match(/name="nonce" value="([a-f0-9]+)"/)[1];
   const headers={origin:'https://factory.example.com','content-type':'application/x-www-form-urlencoded',cookie:page.headers['set-cookie'].split(';')[0]};
   const rejected=await invoke(handler,{method:'POST',headers,body:new URLSearchParams({nonce,owner_token:'wrong'}).toString()});

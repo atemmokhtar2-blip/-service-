@@ -46,6 +46,14 @@ refresh token by hand:
   Re-running the flow replaces the singleton row (owner re-consent recovery);
   it never accumulates rows.
 - **Strict scope check.** The exchange rejects absent or unexpected scopes before storage. Only the exact `gmail.send` scope is accepted.
+- **Origin-checked form POST.** The start route accepts only a POST whose
+  `Origin` header exactly matches the deployment origin. To keep browsers
+  able to send that header on the form navigation, the form page is served
+  with `Referrer-Policy: strict-origin-when-cross-origin`; under
+  `no-referrer`, browsers degrade the navigation `Origin` to `"null"`, which
+  this route must reject. The page holds no sensitive URL parameters, so the
+  policy change exposes nothing; cross-origin referrers still receive no
+  path or query.
 
 ## What enabling this does NOT do
 
