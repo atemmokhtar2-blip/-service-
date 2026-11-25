@@ -164,10 +164,15 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
   }
   draft = created[0];
   const paymentSource = String(draft.payment_source);
+  const adminIdsRaw = (process.env.FACTORY_ADMIN_IDS ?? "").trim();
+  const admins = adminIdsRaw.split(",").map((v) => Number(v.trim())).filter((v) => Number.isSafeInteger(v) && v > 0);
+  console.info("factory_edit_request_created", {
+    requestId, templateKey: String(draft.template_key), paymentSource,
+    adminIdsConfigured: adminIdsRaw.length > 0, adminCount: admins.length,
+  });
   await sendMessage(token(), chatId, `تم إرسال طلب التعديل بنجاح.\nرمز نسختك: <code>${code}</code>\nرقم الطلب: <code>${requestId.slice(0,8).toUpperCase()}</code>\nسيتم إشعارك عند بدء التنفيذ أو اكتماله.`);
-  const admins = (process.env.FACTORY_ADMIN_IDS ?? "").split(",").map((v) => Number(v.trim())).filter((v) => Number.isSafeInteger(v) && v > 0);
   if (!admins.length) {
-    console.error("factory_edit_admins_not_configured", { requestId });
+    console.error("factory_edit_admins_not_configured", { requestId, envPresent: adminIdsRaw.length > 0, parsedAdminCount: 0 });
   } else {
     const owner = [user.first_name, user.username ? `@${user.username}` : null].filter(Boolean).join(' · ') || String(user.id);
     const message = `<b>طلب تعديل جديد</b>\n\nالنسخة: <code>${code}</code>\nالقالب: <b>${escapeHtml(String(draft.template_key))}</b>\nالبوت: ${escapeHtml(String(draft.bot_username ? "@" + draft.bot_username : "غير محدد"))}\nالمالك: ${escapeHtml(owner)}\nTelegram ID: <code>${user.id}</code>\nمصدر الرصيد: <b>${paymentSource === "free" ? "مجاني" : "مدفوع"}</b>\nرقم الطلب: <code>${requestId}</code>\n\n<b>المطلوب:</b>\n${escapeHtml(String(draft.request_text))}`;
@@ -175,10 +180,21 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
       [{ text: "بدء التنفيذ", callback_data: `edit_admin:in_progress:${requestId}`, style: "primary" }],
       [{ text: "اكتمل التعديل", callback_data: `edit_admin:completed:${requestId}`, style: "success" }, { text: "رفض الطلب", callback_data: `edit_admin:rejected:${requestId}`, style: "danger" }],
     ];
+    let adminDelivered = 0;
     for (const adminId of admins) {
-      try { await sendMessage(token(), adminId, message, keyboard); }
-      catch (error) { console.error("factory_edit_admin_delivery_failed", { requestId, adminId, errorType: error instanceof Error ? error.name : "unknown" }); }
+      try {
+        await sendMessage(token(), adminId, message, keyboard);
+        adminDelivered++;
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : "";
+        const safeCode = messageText.match(/^telegram_[a-zA-Z]+_failed_\d+/)?.[0] ?? null;
+        console.error("factory_edit_admin_delivery_failed", {
+          requestId, adminId, errorType: error instanceof Error ? error.name : "unknown",
+          errorCode: safeCode,
+        });
+      }
     }
+    console.info("factory_edit_admin_delivery_summary", { requestId, adminCount: admins.length, delivered: adminDelivered, failed: admins.length - adminDelivered });
   }
   // Optional intake email copy. Runs only when EDIT_INTAKE_EMAIL_ENABLED is
   // set. It is a single guarded database insert AFTER all Telegram messages,

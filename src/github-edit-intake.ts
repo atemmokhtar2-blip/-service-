@@ -17,8 +17,12 @@ export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): C
   const repo = (env.GITHUB_EDIT_REQUESTS_REPO ?? "").trim();
   const token = (env.GITHUB_EDIT_REQUESTS_TOKEN ?? "").trim();
   const cutoffRaw = (env.GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER ?? "").trim();
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !token || !cutoffRaw) {
-    console.warn("factory_github_edit_config_incomplete");
+  const missing: string[] = [];
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) missing.push("GITHUB_EDIT_REQUESTS_REPO");
+  if (!token) missing.push("GITHUB_EDIT_REQUESTS_TOKEN");
+  if (!cutoffRaw) missing.push("GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER");
+  if (missing.length) {
+    console.warn("factory_github_edit_config_incomplete", { missing });
     return null;
   }
   const cutoff = Date.parse(cutoffRaw);
@@ -80,11 +84,40 @@ function issueBody(row: any): string {
   ].join("\n");
 }
 
+class GitHubEditHttpError extends Error {
+  readonly status: number;
+  readonly stage: string;
+  readonly requestId: string;
+  readonly githubRequestId: string | null;
+  readonly retryAfter: string | null;
+  readonly rateLimitRemaining: string | null;
+
+  constructor(
+    status: number,
+    stage: string,
+    requestId: string,
+    githubRequestId: string | null,
+    retryAfter: string | null,
+    rateLimitRemaining: string | null,
+  ) {
+    super(`github_edit_http_${status}`);
+    this.name = "GitHubEditHttpError";
+    this.status = status;
+    this.stage = stage;
+    this.requestId = requestId;
+    this.githubRequestId = githubRequestId;
+    this.retryAfter = retryAfter;
+    this.rateLimitRemaining = rateLimitRemaining;
+  }
+}
+
 async function githubRequest(
   config: Config,
   path: string,
   init: RequestInit = {},
   fetcher: Fetcher = fetch,
+  stage = "github_request",
+  requestId = "unknown",
 ): Promise<any> {
   const response = await fetcher(`https://api.github.com${path}`, {
     ...init,
@@ -100,34 +133,60 @@ async function githubRequest(
   const raw = await response.text();
   let payload: any = null;
   try { payload = raw ? JSON.parse(raw) : null; } catch { /* never log raw provider data */ }
-  if (!response.ok) throw new Error(`github_edit_http_${response.status}`);
+  if (!response.ok) {
+    throw new GitHubEditHttpError(
+      response.status,
+      stage,
+      requestId,
+      response.headers.get("x-github-request-id"),
+      response.headers.get("retry-after"),
+      response.headers.get("x-ratelimit-remaining"),
+    );
+  }
   return payload;
 }
 
 async function findExistingIssue(config: Config, requestId: string, fetcher: Fetcher): Promise<any | null> {
   const query = `repo:${config.repo} in:body "${requestId}"`;
   const url = `/search/issues?q=${encodeURIComponent(query)}&per_page=1`;
-  const result = await githubRequest(config, url, {}, fetcher);
+  const result = await githubRequest(config, url, {}, fetcher, "dedupe_search", requestId);
   return Array.isArray(result?.items) && result.items.length ? result.items[0] : null;
 }
 
-async function publishIssue(config: Config, row: any, fetcher: Fetcher): Promise<{ number: number; html_url: string }> {
-  const repository = await githubRequest(config, `/repos/${config.repo}`, {}, fetcher);
-  if (repository?.private !== true) throw new Error("github_edit_repository_must_be_private");
+async function publishIssue(
+  config: Config,
+  row: any,
+  fetcher: Fetcher,
+  onStage: (stage: string) => void = () => {},
+): Promise<{ number: number; html_url: string }> {
   const requestId = String(row.request_id);
+  onStage("repository_check");
+  const repository = await githubRequest(config, `/repos/${config.repo}`, {}, fetcher, "repository_check", requestId);
+  if (repository?.private !== true) {
+    console.error("factory_github_edit_repository_rejected", { requestId, repo: config.repo, isPrivate: repository?.private === true });
+    throw new Error("github_edit_repository_must_be_private");
+  }
+  console.info("factory_github_edit_stage_succeeded", { requestId, stage: "repository_check", repo: config.repo });
   // Search first to make retries idempotent if GitHub created the issue but
   // the function crashed before recording the outbox success.
+  onStage("dedupe_search");
   const existing = await findExistingIssue(config, requestId, fetcher);
-  if (existing) return { number: Number(existing.number), html_url: String(existing.html_url) };
+  if (existing) {
+    console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_search", outcome: "existing_issue_found", issueNumber: Number(existing.number) });
+    return { number: Number(existing.number), html_url: String(existing.html_url) };
+  }
+  console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_search", outcome: "no_existing_issue" });
 
   const title = `[تعديل نسخة] ${String(row.public_code)} — ${requestId.slice(0, 8).toUpperCase()}`;
+  onStage("issue_create");
   const created = await githubRequest(config, `/repos/${config.repo}/issues`, {
     method: "POST",
     body: JSON.stringify({ title, body: issueBody(row) }),
-  }, fetcher);
+  }, fetcher, "issue_create", requestId);
   if (!Number.isSafeInteger(created?.number) || typeof created?.html_url !== "string") {
     throw new Error("github_edit_invalid_issue_response");
   }
+  console.info("factory_github_edit_stage_succeeded", { requestId, stage: "issue_create", issueNumber: Number(created.number) });
   return { number: Number(created.number), html_url: String(created.html_url) };
 }
 
@@ -181,6 +240,7 @@ export async function processGitHubEditOutbox(
   await ensureGitHubEditOutboxSchema(db);
   await backfill(db, config);
   const claimed = await claimBatch(db, batchSize);
+  console.info("factory_github_edit_batch_claimed", { claimedCount: claimed.length, batchSize, budgetMs });
   const deadline = Date.now() + budgetMs;
   let sent = 0;
   let failed = 0;
@@ -188,6 +248,8 @@ export async function processGitHubEditOutbox(
   for (const item of claimed) {
     const requestId = String(item.request_id);
     const attempts = Number(item.attempts);
+    let currentStage = "load_request";
+    console.info("factory_github_edit_delivery_started", { requestId, attempt: attempts });
     if (Date.now() >= deadline) {
       await db`UPDATE factory_github_edit_outbox SET status='pending', updated_at=NOW() WHERE request_id=${requestId}::uuid`;
       continue;
@@ -202,7 +264,8 @@ export async function processGitHubEditOutbox(
         LIMIT 1
       `;
       if (!rows.length) throw new Error("github_edit_request_missing");
-      const issue = await publishIssue(config, rows[0], fetcher);
+      currentStage = "publish_issue";
+      const issue = await publishIssue(config, rows[0], fetcher, (stage) => { currentStage = stage; });
       await db`
         UPDATE factory_github_edit_outbox
         SET status='sent', issue_number=${issue.number}, issue_url=${issue.html_url},
@@ -210,10 +273,23 @@ export async function processGitHubEditOutbox(
         WHERE request_id=${requestId}::uuid
       `;
       sent++;
+      console.info("factory_github_edit_delivery_succeeded", { requestId, attempt: attempts, issueNumber: issue.number, durationMs: Date.now() - (deadline - budgetMs) });
     } catch (error) {
       const code = error instanceof Error && /^github_edit_http_\d+$/.test(error.message)
         ? error.message
-        : error instanceof Error ? error.name : "unknown";
+        : error instanceof Error ? error.message === "github_edit_repository_must_be_private" ? error.message : error.name : "unknown";
+      if (error instanceof GitHubEditHttpError) {
+        console.error("factory_github_edit_delivery_failed", {
+          requestId, attempt: attempts, stage: error.stage, status: error.status,
+          githubRequestId: error.githubRequestId, retryAfter: error.retryAfter,
+          rateLimitRemaining: error.rateLimitRemaining,
+        });
+      } else {
+        console.error("factory_github_edit_delivery_failed", {
+          requestId, attempt: attempts, stage: currentStage,
+          errorCode: code, errorType: error instanceof Error ? error.name : "unknown",
+        });
+      }
       await db`
         UPDATE factory_github_edit_outbox
         SET status=${attempts >= MAX_ATTEMPTS ? "failed" : "pending"},
@@ -237,6 +313,7 @@ export async function processGitHubEditOutboxSafely(db: Query, budgetMs = DEFAUL
     }
   } catch (error) {
     console.error("factory_github_edit_outbox_failed", {
+      stage: "outbox_processing",
       errorType: error instanceof Error ? error.name : "unknown",
       duration_ms: Date.now() - startedAt,
     });
