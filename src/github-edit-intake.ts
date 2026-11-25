@@ -85,16 +85,29 @@ function issueBody(row: any): string {
 }
 
 class GitHubEditHttpError extends Error {
+  readonly status: number;
+  readonly stage: string;
+  readonly requestId: string;
+  readonly githubRequestId: string | null;
+  readonly retryAfter: string | null;
+  readonly rateLimitRemaining: string | null;
+
   constructor(
-    readonly status: number,
-    readonly stage: string,
-    readonly requestId: string,
-    readonly githubRequestId: string | null,
-    readonly retryAfter: string | null,
-    readonly rateLimitRemaining: string | null,
+    status: number,
+    stage: string,
+    requestId: string,
+    githubRequestId: string | null,
+    retryAfter: string | null,
+    rateLimitRemaining: string | null,
   ) {
     super(`github_edit_http_${status}`);
     this.name = "GitHubEditHttpError";
+    this.status = status;
+    this.stage = stage;
+    this.requestId = requestId;
+    this.githubRequestId = githubRequestId;
+    this.retryAfter = retryAfter;
+    this.rateLimitRemaining = rateLimitRemaining;
   }
 }
 
