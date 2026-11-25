@@ -1,25 +1,32 @@
+import { createSign } from "node:crypto";
+
 // GitHub Issues mirror for confirmed factory edit requests. The factory DB is
 // authoritative; this outbox is durable and retries delivery. The target
 // repository MUST be private because issue bodies contain customer requests.
 type Query = (strings: TemplateStringsArray, ...values: any[]) => Promise<any[]>;
-type Config = { repo: string; token: string; activatedAfter: Date };
+type Config = { repo: string; appId: string; installationId: string; privateKey: string; activatedAfter: Date };
 type Fetcher = typeof fetch;
 
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 1;
 const REQUEST_TIMEOUT_MS = 2_000;
 const DEFAULT_BUDGET_MS = 5_000;
+const installationTokenCache = new Map<string, { token: string; expiresAt: number }>();
 
 export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config | null {
   const enabled = (env.GITHUB_EDIT_REQUESTS_ENABLED ?? "").trim().toLowerCase();
   if (enabled !== "true" && enabled !== "1") return null;
 
   const repo = (env.GITHUB_EDIT_REQUESTS_REPO ?? "").trim();
-  const token = (env.GITHUB_EDIT_REQUESTS_TOKEN ?? "").trim();
+  const appId = (env.GITHUB_EDIT_REQUESTS_APP_ID ?? "").trim();
+  const installationId = (env.GITHUB_EDIT_REQUESTS_INSTALLATION_ID ?? "").trim();
+  const privateKey = (env.GITHUB_EDIT_REQUESTS_PRIVATE_KEY ?? "").replace(/\\n/g, "\n").trim();
   const cutoffRaw = (env.GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER ?? "").trim();
   const missing: string[] = [];
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) missing.push("GITHUB_EDIT_REQUESTS_REPO");
-  if (!token) missing.push("GITHUB_EDIT_REQUESTS_TOKEN");
+  if (!/^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(repo)) missing.push("GITHUB_EDIT_REQUESTS_REPO");
+  if (!/^\\d+$/.test(appId)) missing.push("GITHUB_EDIT_REQUESTS_APP_ID");
+  if (!/^\\d+$/.test(installationId)) missing.push("GITHUB_EDIT_REQUESTS_INSTALLATION_ID");
+  if (!privateKey.includes("BEGIN RSA PRIVATE KEY") && !privateKey.includes("BEGIN PRIVATE KEY")) missing.push("GITHUB_EDIT_REQUESTS_PRIVATE_KEY");
   if (!cutoffRaw) missing.push("GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER");
   if (missing.length) {
     console.warn("factory_github_edit_config_incomplete", { missing });
@@ -30,7 +37,7 @@ export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): C
     console.warn("factory_github_edit_cutoff_invalid");
     return null;
   }
-  return { repo, token, activatedAfter: new Date(cutoff) };
+  return { repo, appId, installationId, privateKey, activatedAfter: new Date(cutoff) };
 }
 
 export async function ensureGitHubEditOutboxSchema(db: Query): Promise<void> {
@@ -111,6 +118,36 @@ class GitHubEditHttpError extends Error {
   }
 }
 
+async function installationToken(config: Config, fetcher: Fetcher): Promise<string> {
+  const cacheKey = `${config.appId}:${config.installationId}`;
+  const cached = installationTokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+  const now = Math.floor(Date.now() / 1000);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const unsigned = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({ iat: now - 60, exp: now + 8 * 60, iss: config.appId })}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(unsigned);
+  signer.end();
+  const jwt = `${unsigned}.${signer.sign(config.privateKey).toString("base64url")}`;
+  const response = await fetcher(`https://api.github.com/app/installations/${config.installationId}/access_tokens`, {
+    method: "POST",
+    headers: { accept: "application/vnd.github+json", authorization: `Bearer ${jwt}`, "x-github-api-version": "2022-11-28" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const raw = await response.text();
+  let payload: any = null;
+  try { payload = raw ? JSON.parse(raw) : null; } catch { /* never log provider response bodies */ }
+  if (!response.ok || typeof payload?.token !== "string") {
+    throw new GitHubEditHttpError(response.status, "installation_token", "token_exchange",
+      response.headers.get("x-github-request-id"), response.headers.get("retry-after"),
+      response.headers.get("x-ratelimit-remaining"));
+  }
+  const expiresAt = Date.parse(String(payload.expires_at ?? ""));
+  if (!Number.isFinite(expiresAt)) throw new Error("github_app_token_expiry_invalid");
+  installationTokenCache.set(cacheKey, { token: payload.token, expiresAt });
+  return payload.token;
+}
+
 async function githubRequest(
   config: Config,
   path: string,
@@ -119,11 +156,12 @@ async function githubRequest(
   stage = "github_request",
   requestId = "unknown",
 ): Promise<any> {
+  const accessToken = await installationToken(config, fetcher);
   const response = await fetcher(`https://api.github.com${path}`, {
     ...init,
     headers: {
       accept: "application/vnd.github+json",
-      authorization: `Bearer ${config.token}`,
+      authorization: `Bearer ${accessToken}`,
       "x-github-api-version": "2022-11-28",
       ...(init.body ? { "content-type": "application/json" } : {}),
       ...init.headers,
