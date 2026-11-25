@@ -23,9 +23,9 @@ export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): C
   const privateKey = (env.GITHUB_EDIT_REQUESTS_PRIVATE_KEY ?? "").replace(/\\n/g, "\n").trim();
   const cutoffRaw = (env.GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER ?? "").trim();
   const missing: string[] = [];
-  if (!/^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(repo)) missing.push("GITHUB_EDIT_REQUESTS_REPO");
-  if (!/^\\d+$/.test(appId)) missing.push("GITHUB_EDIT_REQUESTS_APP_ID");
-  if (!/^\\d+$/.test(installationId)) missing.push("GITHUB_EDIT_REQUESTS_INSTALLATION_ID");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) missing.push("GITHUB_EDIT_REQUESTS_REPO");
+  if (!/^\d+$/.test(appId)) missing.push("GITHUB_EDIT_REQUESTS_APP_ID");
+  if (!/^\d+$/.test(installationId)) missing.push("GITHUB_EDIT_REQUESTS_INSTALLATION_ID");
   if (!privateKey.includes("BEGIN RSA PRIVATE KEY") && !privateKey.includes("BEGIN PRIVATE KEY")) missing.push("GITHUB_EDIT_REQUESTS_PRIVATE_KEY");
   if (!cutoffRaw) missing.push("GITHUB_EDIT_REQUESTS_ACTIVATED_AFTER");
   if (missing.length) {
