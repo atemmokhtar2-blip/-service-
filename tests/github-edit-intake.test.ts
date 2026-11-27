@@ -104,7 +104,7 @@ test("GitHub HTTP errors expose only a short sanitized provider message", async 
   const { findExistingIssue } = await import("../src/github-edit-intake.ts");
   const secret = "test-secret-token";
   const fetcher = async () => new Response(JSON.stringify({
-    message: `Validation Failed: ${secret}\\nextra`,
+    message: `Validation Failed: ${secret}\nextra`,
     errors: [{ message: "invalid query" }],
   }), { status: 422, headers: { "content-type": "application/json" } });
   await assert.rejects(
