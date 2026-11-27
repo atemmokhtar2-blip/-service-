@@ -221,7 +221,7 @@ export async function findExistingIssue(
   throw new Error("github_edit_dedupe_scan_incomplete");
 }
 
-async function publishIssue(
+export async function publishIssue(
   config: Config,
   row: any,
   fetcher: Fetcher,
