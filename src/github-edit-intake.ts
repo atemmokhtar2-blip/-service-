@@ -346,9 +346,14 @@ export async function processGitHubEditOutbox(
       sent++;
       console.info("factory_github_edit_delivery_succeeded", { requestId, attempt: attempts, issueNumber: issue.number, durationMs: Date.now() - (deadline - budgetMs) });
     } catch (error) {
-      const code = error instanceof Error && /^github_edit_http_\d+$/.test(error.message)
+      const code = error instanceof Error && (
+        /^github_edit_http_\\d+$/.test(error.message)
+        || error.message === "github_edit_repository_must_be_private"
+        || error.message === "github_edit_dedupe_scan_incomplete"
+        || error.message === "github_edit_invalid_request_created_at"
+      )
         ? error.message
-        : error instanceof Error ? error.message === "github_edit_repository_must_be_private" ? error.message : error.name : "unknown";
+        : error instanceof Error ? error.name : "unknown";
       if (error instanceof GitHubEditHttpError) {
         console.error("factory_github_edit_delivery_failed", {
           requestId, attempt: attempts, stage: error.stage, status: error.status,
