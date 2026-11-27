@@ -1,14 +1,14 @@
-# Per-instance editing and credits
+# User-level daily editing credits
 
 ## Customer experience
 
-After a template instance is provisioned, the factory shows its dedicated management screen with an immutable public instance code, lifecycle status, monthly free-edit balance, paid-edit balance, and an **Edit your copy** action. The code is an identifier for support and admin routing only; authorization always uses the Telegram owner ID plus the internal instance UUID.
+After a template instance is provisioned, the factory shows its dedicated management screen with an immutable public instance code, lifecycle status, account-wide daily free-edit balance, paid-edit balance, and an **Edit your copy** action. The code is an identifier for support and admin routing only; authorization always uses the Telegram owner ID plus the internal instance UUID.
 
 The customer submits a 20–2,000 character change request, reviews it, and explicitly confirms sending it. The factory checks ownership and channel membership, allows at most one open request per instance, and records the request with its payment source.
 
-## Monthly free credits
+## Daily free credits
 
-Each instance receives one free edit credit per calendar month. The unused free balance expires when the database month changes; it does not roll over. The first request in a new month consumes that month's one credit. Paid credits are stored separately and do not expire through the monthly reset.
+Each Telegram user receives two free edit requests shared across all of their bot instances. The 24-hour window starts when the user sends their first free request in a new window. The allowance resets to two after 24 hours from that start time; unused credits do not roll over. Opening the management screen does not start or reset the timer. Paid credits remain separate, instance-scoped, and do not expire through the daily reset.
 
 ## Admin workflow
 
@@ -21,6 +21,6 @@ For a paid order, verify payment outside the bot and then issue `/grant_edits XV
 - `factory_instances.public_code` is unique and generated from cryptographically secure random bytes.
 - Requests are scoped by both Telegram owner ID and internal instance UUID.
 - A partial unique index prevents more than one `pending` or `in_progress` request per instance.
-- Credit balances are changed with conditional SQL updates; duplicate request conflicts restore the reserved credit.
+- The account-wide quota row serializes free-credit consumption across all instances. Credit debit, request creation, draft removal, and ledger insertion happen in one SQL statement. A rejected free request is refunded only while its original 24-hour window is still active; paid credits are refunded separately.
 - `factory_edit_credit_ledger` records credit consumption and paid-credit grants.
 - Bot tokens are not included in edit-request messages or ledger records.
