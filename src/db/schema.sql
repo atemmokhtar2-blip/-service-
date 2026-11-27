@@ -11,9 +11,11 @@ CREATE TABLE IF NOT EXISTS factory_users (
 CREATE TABLE IF NOT EXISTS factory_user_edit_quotas (
   owner_telegram_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id) ON DELETE CASCADE,
   free_credits INTEGER NOT NULL DEFAULT 2 CHECK (free_credits BETWEEN 0 AND 2),
-  window_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  window_started_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP NOT NULL;
+ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP DEFAULT;
 
 CREATE TABLE IF NOT EXISTS factory_instances (
   id UUID PRIMARY KEY,
