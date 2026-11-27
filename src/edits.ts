@@ -29,9 +29,11 @@ export async function ensureEditSchema(): Promise<void> {
   await sql`CREATE TABLE IF NOT EXISTS factory_user_edit_quotas (
     owner_telegram_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id) ON DELETE CASCADE,
     free_credits INTEGER NOT NULL DEFAULT 2 CHECK (free_credits BETWEEN 0 AND 2),
-    window_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    window_started_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`;
+  await sql`ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP NOT NULL`;
+  await sql`ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP DEFAULT`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_instances_public_code_unique ON factory_instances(public_code) WHERE public_code IS NOT NULL`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_edit_drafts (
