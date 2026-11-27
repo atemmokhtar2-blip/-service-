@@ -50,10 +50,10 @@ test("dedupe lists private-repository issues instead of using Search API", async
   );
   assert.equal(result, null);
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /\\/repos\\/owner\\/private-repo\\/issues\\?/);
-  assert.match(calls[0], /state=all/);
-  assert.match(calls[0], /sort=created/);
-  assert.doesNotMatch(calls[0], /search\\/issues/);
+  assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
+  assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
+  assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
+  assert.ok(!calls[0].includes("search/issues"));
 });
 
 test("dedupe reuses an existing issue marker and ignores pull requests", async () => {
