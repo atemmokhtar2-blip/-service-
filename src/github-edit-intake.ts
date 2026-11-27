@@ -114,6 +114,7 @@ class GitHubEditHttpError extends Error {
   readonly githubRequestId: string | null;
   readonly retryAfter: string | null;
   readonly rateLimitRemaining: string | null;
+  readonly providerMessage: string | null;
 
   constructor(
     status: number,
@@ -122,6 +123,7 @@ class GitHubEditHttpError extends Error {
     githubRequestId: string | null,
     retryAfter: string | null,
     rateLimitRemaining: string | null,
+    providerMessage: string | null,
   ) {
     super(`github_edit_http_${status}`);
     this.name = "GitHubEditHttpError";
@@ -131,6 +133,7 @@ class GitHubEditHttpError extends Error {
     this.githubRequestId = githubRequestId;
     this.retryAfter = retryAfter;
     this.rateLimitRemaining = rateLimitRemaining;
+    this.providerMessage = providerMessage;
   }
 }
 
