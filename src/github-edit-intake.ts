@@ -9,6 +9,9 @@ const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 1;
 const REQUEST_TIMEOUT_MS = 2_000;
 const DEFAULT_BUDGET_MS = 5_000;
+const DEDUPE_PAGE_SIZE = 100;
+const MAX_DEDUPE_PAGES = 5;
+const DEDUPE_CLOCK_SKEW_MS = 60_000;
 
 export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config | null {
   const enabled = (env.GITHUB_EDIT_REQUESTS_ENABLED ?? "").trim().toLowerCase();
@@ -56,6 +59,26 @@ function quoteUntrustedText(value: string): string {
 
 function marker(requestId: string): string {
   return `<!-- xelvor-edit-request:${requestId} -->`;
+}
+
+function safeProviderMessage(payload: any, token: string): string | null {
+  const candidates = [
+    ...(typeof payload?.message === "string" ? [payload.message] : []),
+    ...(Array.isArray(payload?.errors)
+      ? payload.errors.map((item: any) => typeof item?.message === "string" ? item.message : null)
+      : []),
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const safe = candidate
+      .replaceAll(token, "[redacted]")
+      .replace(/[\\u0000-\\u001f\\u007f]/g, " ")
+      .replace(/\\s+/g, " ")
+      .trim()
+      .slice(0, 180);
+    if (safe) return safe;
+  }
+  return null;
 }
 
 function issueBody(row: any): string {
@@ -141,16 +164,61 @@ async function githubRequest(
       response.headers.get("x-github-request-id"),
       response.headers.get("retry-after"),
       response.headers.get("x-ratelimit-remaining"),
+      safeProviderMessage(payload, config.token),
     );
   }
   return payload;
 }
 
-async function findExistingIssue(config: Config, requestId: string, fetcher: Fetcher): Promise<any | null> {
-  const query = `repo:${config.repo} in:body "${requestId}"`;
-  const url = `/search/issues?q=${encodeURIComponent(query)}&per_page=1`;
-  const result = await githubRequest(config, url, {}, fetcher, "dedupe_search", requestId);
-  return Array.isArray(result?.items) && result.items.length ? result.items[0] : null;
+export async function findExistingIssue(
+  config: Config,
+  requestId: string,
+  fetcher: Fetcher,
+  requestCreatedAt: string,
+): Promise<any | null> {
+  const createdAtMs = Date.parse(requestCreatedAt);
+  if (!Number.isFinite(createdAtMs)) throw new Error("github_edit_invalid_request_created_at");
+
+  // The Search API can reject valid private-repository queries with HTTP 422.
+  // The Issues list endpoint is supported for private repos and lets us scan
+  // only issues updated since this request was created. Because every issue
+  // is updated at creation, no possible duplicate is excluded by this filter.
+  const cutoffMs = createdAtMs - DEDUPE_CLOCK_SKEW_MS;
+  const since = new Date(cutoffMs).toISOString();
+
+  for (let page = 1; page <= MAX_DEDUPE_PAGES; page++) {
+    const params = new URLSearchParams({
+      state: "all",
+      per_page: String(DEDUPE_PAGE_SIZE),
+      sort: "created",
+      direction: "desc",
+      since,
+      page: String(page),
+    });
+    const result = await githubRequest(
+      config,
+      `/repos/${config.repo}/issues?${params.toString()}`,
+      {},
+      fetcher,
+      "dedupe_list",
+      requestId,
+    );
+    const items = Array.isArray(result) ? result : [];
+    for (const item of items) {
+      const issueCreatedAt = Date.parse(String(item?.created_at ?? ""));
+      // Results are sorted newest-first. Once we cross the cutoff, no later
+      // page can contain an issue created after this request.
+      if (Number.isFinite(issueCreatedAt) && issueCreatedAt < cutoffMs) return null;
+      if (!item?.pull_request && typeof item?.body === "string" && item.body.includes(marker(requestId))) {
+        return item;
+      }
+    }
+    if (items.length < DEDUPE_PAGE_SIZE) return null;
+  }
+
+  // Never create an issue if the scan was truncated: doing so could duplicate
+  // an issue created by a previous attempt whose response was lost.
+  throw new Error("github_edit_dedupe_scan_incomplete");
 }
 
 async function publishIssue(
@@ -170,7 +238,7 @@ async function publishIssue(
   // Search first to make retries idempotent if GitHub created the issue but
   // the function crashed before recording the outbox success.
   onStage("dedupe_search");
-  const existing = await findExistingIssue(config, requestId, fetcher);
+  const existing = await findExistingIssue(config, requestId, fetcher, String(row.created_at));
   if (existing) {
     console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_search", outcome: "existing_issue_found", issueNumber: Number(existing.number) });
     return { number: Number(existing.number), html_url: String(existing.html_url) };
@@ -283,11 +351,15 @@ export async function processGitHubEditOutbox(
           requestId, attempt: attempts, stage: error.stage, status: error.status,
           githubRequestId: error.githubRequestId, retryAfter: error.retryAfter,
           rateLimitRemaining: error.rateLimitRemaining,
+          providerMessage: error.providerMessage,
         });
       } else {
         console.error("factory_github_edit_delivery_failed", {
           requestId, attempt: attempts, stage: currentStage,
           errorCode: code, errorType: error instanceof Error ? error.name : "unknown",
+          ...(error instanceof Error && error.message === "github_edit_dedupe_scan_incomplete"
+            ? { dedupeScanComplete: false }
+            : {}),
         });
       }
       await db`
