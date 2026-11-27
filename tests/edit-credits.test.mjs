@@ -11,13 +11,13 @@ async function fixture() {
   const ids = [randomUUID(), randomUUID()];
   await pg.query('INSERT INTO factory_users(telegram_user_id) VALUES (1)');
   for (let i = 0; i < ids.length; i++) {
-    await pg.query(\`INSERT INTO factory_instances(id, owner_telegram_id, template_key, status, request_id, public_code)
-      VALUES ($1, 1, $2, 'active', $3, $4)\`, [ids[i], \`template-\${i}\`, randomUUID(), \`XV-TESTCODE\${i}\`]);
+    await pg.query(`INSERT INTO factory_instances(id, owner_telegram_id, template_key, status, request_id, public_code)
+      VALUES ($1, 1, $2, 'active', $3, $4)`, [ids[i], `template-${i}`, randomUUID(), `XV-TESTCODE${i}`]);
   }
   async function draft(instanceId = ids[0]) {
-    await pg.query(\`INSERT INTO factory_edit_drafts(telegram_user_id,instance_id,request_text)
+    await pg.query(`INSERT INTO factory_edit_drafts(telegram_user_id,instance_id,request_text)
       VALUES (1,$1,'Please change the welcome message') ON CONFLICT (telegram_user_id)
-      DO UPDATE SET instance_id=EXCLUDED.instance_id,request_text=EXCLUDED.request_text\`, [instanceId]);
+      DO UPDATE SET instance_id=EXCLUDED.instance_id,request_text=EXCLUDED.request_text`, [instanceId]);
   }
   const db = async (strings, ...values) => {
     const text = strings.reduce((s, part, i) => s + part + (i < values.length ? '$' + (i + 1) : ''), '');
@@ -25,7 +25,7 @@ async function fixture() {
   };
   const quota = async () => (await pg.query('SELECT free_credits,window_started_at FROM factory_user_edit_quotas WHERE owner_telegram_id=1')).rows[0];
   const paid = async (instanceId = ids[0]) => (await pg.query('SELECT paid_edit_credits FROM factory_instances WHERE id=$1', [instanceId])).rows[0].paid_edit_credits;
-  const count = async (table) => Number((await pg.query(\`SELECT count(*) AS n FROM \${table}\`)).rows[0].n);
+  const count = async (table) => Number((await pg.query(`SELECT count(*) AS n FROM ${table}`)).rows[0].n);
   await draft();
   return {pg,ids,db,draft,quota,paid,count};
 }
@@ -84,9 +84,9 @@ test('a request cannot consume twice while the same instance has an open request
 test('ledger failure rolls back the request, daily debit and draft removal', async () => {
   const f = await fixture();
   try {
-    await f.pg.exec(\`CREATE FUNCTION fail_ledger() RETURNS trigger LANGUAGE plpgsql AS $$
+    await f.pg.exec(`CREATE FUNCTION fail_ledger() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'test ledger failure'; END $$;
-      CREATE TRIGGER fail_ledger BEFORE INSERT ON factory_edit_credit_ledger FOR EACH ROW EXECUTE FUNCTION fail_ledger();\`);
+      CREATE TRIGGER fail_ledger BEFORE INSERT ON factory_edit_credit_ledger FOR EACH ROW EXECUTE FUNCTION fail_ledger();`);
     await assert.rejects(consumeEditCredit(f.db,1,randomUUID()));
     assert.equal((await f.quota()).free_credits,2);
     assert.equal(await f.count('factory_edit_requests'),0);
