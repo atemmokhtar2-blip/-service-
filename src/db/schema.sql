@@ -6,6 +6,15 @@ CREATE TABLE IF NOT EXISTS factory_users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Account-wide free edit allowance: two requests per rolling 24-hour window.
+-- The window begins on the user's first free request, not when they open the UI.
+CREATE TABLE IF NOT EXISTS factory_user_edit_quotas (
+  owner_telegram_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id) ON DELETE CASCADE,
+  free_credits INTEGER NOT NULL DEFAULT 2 CHECK (free_credits BETWEEN 0 AND 2),
+  window_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS factory_instances (
   id UUID PRIMARY KEY,
   owner_telegram_id BIGINT NOT NULL REFERENCES factory_users(telegram_user_id),
@@ -69,6 +78,7 @@ CREATE TABLE IF NOT EXISTS factory_edit_requests (
   handled_by BIGINT,
   admin_note TEXT
 );
+ALTER TABLE factory_edit_requests ADD COLUMN IF NOT EXISTS free_credit_window_started_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS factory_edit_requests_one_open_per_instance ON factory_edit_requests(instance_id) WHERE status IN ('pending','in_progress');
