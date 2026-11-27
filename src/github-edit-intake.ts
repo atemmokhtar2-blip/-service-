@@ -235,15 +235,15 @@ export async function publishIssue(
     throw new Error("github_edit_repository_must_be_private");
   }
   console.info("factory_github_edit_stage_succeeded", { requestId, stage: "repository_check", repo: config.repo });
-  // Search first to make retries idempotent if GitHub created the issue but
+  // List recent issues first to make retries idempotent if GitHub created the issue but
   // the function crashed before recording the outbox success.
-  onStage("dedupe_search");
+  onStage("dedupe_list");
   const existing = await findExistingIssue(config, requestId, fetcher, String(row.created_at));
   if (existing) {
-    console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_search", outcome: "existing_issue_found", issueNumber: Number(existing.number) });
+    console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_list", outcome: "existing_issue_found", issueNumber: Number(existing.number) });
     return { number: Number(existing.number), html_url: String(existing.html_url) };
   }
-  console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_search", outcome: "no_existing_issue" });
+  console.info("factory_github_edit_stage_succeeded", { requestId, stage: "dedupe_list", outcome: "no_existing_issue" });
 
   const title = `[تعديل نسخة] ${String(row.public_code)} — ${requestId.slice(0, 8).toUpperCase()}`;
   onStage("issue_create");
