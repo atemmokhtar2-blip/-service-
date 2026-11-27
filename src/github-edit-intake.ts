@@ -10,7 +10,7 @@ const BATCH_SIZE = 1;
 const REQUEST_TIMEOUT_MS = 2_000;
 const DEFAULT_BUDGET_MS = 5_000;
 const DEDUPE_PAGE_SIZE = 100;
-const MAX_DEDUPE_PAGES = 5;
+const MAX_DEDUPE_PAGES = 2;
 const DEDUPE_CLOCK_SKEW_MS = 60_000;
 
 export function githubEditConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config | null {
