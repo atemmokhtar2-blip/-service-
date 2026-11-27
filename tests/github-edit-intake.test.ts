@@ -51,8 +51,8 @@ test("dedupe lists private-repository issues instead of using Search API", async
   assert.equal(result, null);
   assert.equal(calls.length, 1);
   assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
-  assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
-  assert.ok(calls[0].includes("/repos/owner/private-repo/issues?"));
+  assert.ok(calls[0].includes("state=all"));
+  assert.ok(calls[0].includes("sort=created"));
   assert.ok(!calls[0].includes("search/issues"));
 });
 
@@ -121,4 +121,52 @@ test("GitHub HTTP errors expose only a short sanitized provider message", async 
       return true;
     },
   );
+});
+
+
+test("publishing creates once and reuses the same issue after a retry", async () => {
+  const { publishIssue } = await import("../src/github-edit-intake.ts");
+  const requestId = "3afcf0a0-ea7d-42ff-a6e8-ce7562752c15";
+  let storedIssue: any = null;
+  let createCount = 0;
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/repos/owner/private-repo")) {
+      return new Response(JSON.stringify({ private: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/issues?")) {
+      return new Response(JSON.stringify(storedIssue ? [storedIssue] : []), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.endsWith("/issues") && init?.method === "POST") {
+      createCount++;
+      const body = JSON.parse(String(init.body));
+      storedIssue = {
+        number: 41,
+        html_url: "https://github.com/owner/private-repo/issues/41",
+        body: body.body,
+        created_at: "2026-11-27T07:01:00.000Z",
+      };
+      return new Response(JSON.stringify(storedIssue), { status: 201, headers: { "content-type": "application/json" } });
+    }
+    throw new Error("unexpected_test_request");
+  };
+  const config = {
+    repo: "owner/private-repo",
+    token: "test-token",
+    activatedAfter: new Date("2026-11-24T00:00:00.000Z"),
+  };
+  const row = {
+    request_id: requestId,
+    public_code: "XLV-TEST",
+    request_text: "test request",
+    payment_source: "free",
+    created_at: "2026-11-27T07:00:00.000Z",
+    template_key: "test-template",
+    bot_username: null,
+  };
+  const first = await publishIssue(config, row, fetcher as typeof fetch);
+  const retry = await publishIssue(config, row, fetcher as typeof fetch);
+  assert.equal(first.number, 41);
+  assert.equal(retry.number, 41);
+  assert.equal(createCount, 1);
 });
