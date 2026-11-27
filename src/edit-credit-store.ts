@@ -29,27 +29,34 @@ export async function getEditCreditStatus(db: Query, ownerId: number, instanceId
 }
 
 export async function consumeEditCredit(db: Query, ownerId: number, requestId: string) {
+  // Initialize a quota row only for a real, owned draft. A NULL window means
+  // the user still has both credits and the 24-hour clock has not started.
+  await db`
+    INSERT INTO factory_user_edit_quotas(owner_telegram_id, free_credits, window_started_at)
+    SELECT d.telegram_user_id, 2, NULL
+    FROM factory_edit_drafts d
+    JOIN factory_instances i ON i.id=d.instance_id AND i.owner_telegram_id=d.telegram_user_id
+    WHERE d.telegram_user_id=${ownerId} AND d.request_text IS NOT NULL AND i.public_code IS NOT NULL
+    ON CONFLICT (owner_telegram_id) DO NOTHING
+  `;
   return db`
     WITH quota AS MATERIALIZED (
-      INSERT INTO factory_user_edit_quotas(owner_telegram_id, free_credits, window_started_at)
-      VALUES (${ownerId}, 2, NOW())
-      ON CONFLICT (owner_telegram_id) DO UPDATE SET
-        free_credits = CASE
-          WHEN factory_user_edit_quotas.window_started_at <= NOW() - INTERVAL '24 hours' THEN 2
-          ELSE factory_user_edit_quotas.free_credits
-        END,
-        window_started_at = CASE
-          WHEN factory_user_edit_quotas.window_started_at <= NOW() - INTERVAL '24 hours' THEN NOW()
-          ELSE factory_user_edit_quotas.window_started_at
-        END,
-        updated_at = NOW()
-      RETURNING owner_telegram_id, free_credits, window_started_at
+      SELECT owner_telegram_id,
+        CASE WHEN window_started_at IS NULL
+          OR window_started_at <= NOW() - INTERVAL '24 hours' THEN 2
+          ELSE free_credits END AS available_credits,
+        CASE WHEN window_started_at IS NULL
+          OR window_started_at <= NOW() - INTERVAL '24 hours' THEN NOW()
+          ELSE window_started_at END AS active_window_started_at
+      FROM factory_user_edit_quotas
+      WHERE owner_telegram_id=${ownerId}
+      FOR UPDATE
     ), draft AS MATERIALIZED (
       SELECT d.telegram_user_id, d.instance_id, d.request_text,
         i.public_code, i.template_key, i.bot_username, i.paid_edit_credits,
-        q.free_credits,
-        q.window_started_at AS free_credit_window_started_at,
-        CASE WHEN q.free_credits > 0 THEN 'free' ELSE 'paid' END AS payment_source
+        q.available_credits,
+        q.active_window_started_at AS free_credit_window_started_at,
+        CASE WHEN q.available_credits > 0 THEN 'free' ELSE 'paid' END AS payment_source
       FROM factory_edit_drafts d
       JOIN factory_instances i ON i.id=d.instance_id AND i.owner_telegram_id=d.telegram_user_id
       JOIN quota q ON q.owner_telegram_id=d.telegram_user_id
@@ -72,12 +79,23 @@ export async function consumeEditCredit(db: Query, ownerId: number, requestId: s
       RETURNING *
     ), debited_quota AS (
       UPDATE factory_user_edit_quotas q
-      SET free_credits=q.free_credits-1, updated_at=NOW()
+      SET free_credits=CASE
+          WHEN q.window_started_at IS NULL
+            OR q.window_started_at <= NOW() - INTERVAL '24 hours' THEN 1
+          ELSE q.free_credits-1
+        END,
+        window_started_at=CASE
+          WHEN q.window_started_at IS NULL
+            OR q.window_started_at <= NOW() - INTERVAL '24 hours' THEN NOW()
+          ELSE q.window_started_at
+        END,
+        updated_at=NOW()
       FROM created c
       WHERE c.payment_source='free'
         AND q.owner_telegram_id=c.owner_telegram_id
-        AND q.window_started_at=c.free_credit_window_started_at
-        AND q.free_credits > 0
+        AND (q.window_started_at IS NULL
+          OR q.window_started_at <= NOW() - INTERVAL '24 hours'
+          OR q.free_credits > 0)
       RETURNING q.owner_telegram_id
     ), debited_instance AS (
       UPDATE factory_instances i
