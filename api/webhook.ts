@@ -95,7 +95,7 @@ export default async function handler(req: IncomingMessage & { body?: TelegramUp
         }
         else if (q.data === "edit_confirm") {
           const { requireMembership } = await import("../src/factory.js");
-          if (await requireMembership(q.from, chatId, q.message?.message_id)) await confirmEditRequest(q.from, chatId);
+          if (await requireMembership(q.from, chatId, q.message?.message_id)) await confirmEditRequest(q.from, chatId, q.message?.message_id);
         }
         else if (q.data === "edit_cancel") await cancelEditRequest(q.from, chatId);
         else if (q.data?.startsWith("edit_buy:")) {
