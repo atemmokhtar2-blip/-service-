@@ -1,10 +1,21 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { sql } from "./db.js";
-import { consumeEditCredit, transitionEditRequest } from "./edit-credit-store.js";
+import { consumeEditCredit, getEditCreditStatus, transitionEditRequest } from "./edit-credit-store.js";
 import { enqueueEditIntakeSafely } from "./edit-intake.js";
 import { editMessageText, sendMessage, type InlineButton, type TelegramUser } from "./telegram.js";
 
 const token = () => process.env.FACTORY_BOT_TOKEN ?? "";
+
+function formatTimeUntil(resetAt: unknown): string {
+  const target = resetAt instanceof Date ? resetAt.getTime() : Date.parse(String(resetAt ?? ""));
+  if (!Number.isFinite(target)) return "قريبًا";
+  const totalMinutes = Math.max(1, Math.ceil((target - Date.now()) / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0 && minutes > 0) return `${hours} ساعة و${minutes} دقيقة`;
+  if (hours > 0) return `${hours} ساعة`;
+  return `${minutes} دقيقة`;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]!));
@@ -15,6 +26,14 @@ export async function ensureEditSchema(): Promise<void> {
   await sql`ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS free_edit_credits INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS free_edit_period DATE`;
   await sql`ALTER TABLE factory_instances ADD COLUMN IF NOT EXISTS paid_edit_credits INTEGER NOT NULL DEFAULT 0`;
+  await sql`CREATE TABLE IF NOT EXISTS factory_user_edit_quotas (
+    owner_telegram_id BIGINT PRIMARY KEY REFERENCES factory_users(telegram_user_id) ON DELETE CASCADE,
+    free_credits INTEGER NOT NULL DEFAULT 2 CHECK (free_credits BETWEEN 0 AND 2),
+    window_started_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`;
+  await sql`ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP NOT NULL`;
+  await sql`ALTER TABLE factory_user_edit_quotas ALTER COLUMN window_started_at DROP DEFAULT`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_instances_public_code_unique ON factory_instances(public_code) WHERE public_code IS NOT NULL`;
   await sql`
     CREATE TABLE IF NOT EXISTS factory_edit_drafts (
@@ -37,9 +56,11 @@ export async function ensureEditSchema(): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       handled_by BIGINT,
-      admin_note TEXT
+      admin_note TEXT,
+      free_credit_window_started_at TIMESTAMPTZ
     )
   `;
+  await sql`ALTER TABLE factory_edit_requests ADD COLUMN IF NOT EXISTS free_credit_window_started_at TIMESTAMPTZ`;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_owner_idx ON factory_edit_requests(owner_telegram_id, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS factory_edit_requests_instance_idx ON factory_edit_requests(instance_id, created_at DESC)`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS factory_edit_requests_one_open_per_instance ON factory_edit_requests(instance_id) WHERE status IN ('pending','in_progress')`;
@@ -66,8 +87,7 @@ async function ensurePublicCode(instanceId: string, ownerId: number): Promise<st
 
 export async function showManagedInstance(user: TelegramUser, chatId: number, templateKey: string, messageId?: number): Promise<void> {
   const rows = await sql`
-    SELECT id, template_key, status, bot_username, public_code, free_edit_credits, to_char(free_edit_period, 'YYYY-MM-DD') AS free_edit_period,
-      paid_edit_credits
+    SELECT id, template_key, status, bot_username, public_code, paid_edit_credits
     FROM factory_instances
     WHERE owner_telegram_id=${user.id} AND template_key=${templateKey}
     LIMIT 1
@@ -78,15 +98,17 @@ export async function showManagedInstance(user: TelegramUser, chatId: number, te
   }
   const row = rows[0];
   const code = await ensurePublicCode(String(row.id), user.id);
-  const currentMonth = await sql`SELECT date_trunc('month', NOW())::date AS month_start`;
-  const period = row.free_edit_period ? String(row.free_edit_period).slice(0,10) : "";
-  const activePeriod = String(currentMonth[0].month_start).slice(0,10);
-  const free = period === activePeriod ? Number(row.free_edit_credits) : 1;
-  const paid = Number(row.paid_edit_credits ?? 0);
+  const creditRows = await getEditCreditStatus(sql, user.id, String(row.id));
+  const credits = creditRows[0] ?? { free_credits: 2, paid_edit_credits: row.paid_edit_credits ?? 0, resets_at: null };
+  const free = Number(credits.free_credits);
+  const paid = Number(credits.paid_edit_credits ?? 0);
+  const resetLabel = credits.resets_at
+    ? `يتجدد الرصيد بعد ${formatTimeUntil(credits.resets_at)}`
+    : "تبدأ دورة الـ24 ساعة عند إرسال أول طلب جديد.";
   const status = String(row.status);
   const statusLabel = status === "active" ? "نشطة" : status === "provisioning" ? "قيد التجهيز" : status === "failed" ? "تعذر تشغيلها" : status;
   const heading = status === "active" ? "تم إنشاء نسختك بنجاح" : status === "failed" ? "تعذر إكمال إنشاء نسختك" : "نسختك قيد التجهيز";
-  const text = `<b>${heading}</b>\n\n<b>${escapeHtml(String(row.bot_username ? "@" + row.bot_username : "نسختك"))}</b>\n<code>${code}</code>\n\nالحالة: <b>${statusLabel}</b>\n\n<b>إدارة نسختك</b>\nرصيد التعديل المجاني: <b>${free}</b>\nرصيد التعديلات المدفوعة: <b>${paid}</b>\n\nينتهي الرصيد المجاني غير المستخدم مع بداية الشهر الجديد.`;
+  const text = `<b>${heading}</b>\n\n<b>${escapeHtml(String(row.bot_username ? "@" + row.bot_username : "نسختك"))}</b>\n<code>${code}</code>\n\nالحالة: <b>${statusLabel}</b>\n\n<b>إدارة نسختك</b>\nرصيد التعديل المجاني اليومي: <b>${free}/2</b>\n${escapeHtml(resetLabel)}\nرصيد التعديلات المدفوعة: <b>${paid}</b>\n\nالرصيد المجاني موحّد لكل نسخك، ولا ينتقل المتبقي منه للدورة التالية.`;
   const keyboard: InlineButton[][] = [
     [{ text: "⚙️ تعديل على نسختك", callback_data: `edit_start:${row.id}`, style: "success" }],
     [{ text: "شراء تعديلات إضافية", callback_data: `edit_buy:${row.id}` }],
@@ -121,7 +143,7 @@ export async function hasEditDraft(userId: number): Promise<boolean> {
 export async function captureEditText(user: TelegramUser, chatId: number, text: string): Promise<void> {
   const clean = text.trim();
   if (clean.length < 20 || clean.length > 2000) {
-    await sendMessage(token(), chatId, "اكتب وصفًا من 20 إلى 3000 حرف حتى نقدر نفهم التعديل بدقة.");
+    await sendMessage(token(), chatId, "اكتب وصفًا من 20 إلى 2000 حرف حتى نقدر نفهم التعديل بدقة.");
     return;
   }
   const rows = await sql`
@@ -139,7 +161,7 @@ export async function cancelEditRequest(user: TelegramUser, chatId: number): Pro
   await sendMessage(token(), chatId, "تم إلغاء طلب التعديل.");
 }
 
-export async function confirmEditRequest(user: TelegramUser, chatId: number): Promise<void> {
+export async function confirmEditRequest(user: TelegramUser, chatId: number, messageId?: number): Promise<void> {
   const drafts = await sql`
     SELECT d.instance_id, d.request_text, i.public_code, i.template_key, i.bot_username
     FROM factory_edit_drafts d
@@ -159,7 +181,16 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
   // commit response. A committed request has already consumed its draft.
   const created = await consumeEditCredit(sql, user.id, requestId);
   if (!created.length) {
-    await sendMessage(token(), chatId, "لم يتم إنشاء طلب جديد. راجع وجود طلب مفتوح ورصيد التعديلات ثم حاول مرة أخرى.");
+    const statusRows = await getEditCreditStatus(sql, user.id, String(draft.instance_id));
+    const status = statusRows[0];
+    let notice = "لم يتم إنشاء طلب جديد. حدّث صفحة النسخة وحاول مرة أخرى.";
+    if (status?.has_open_request) {
+      notice = "لديك بالفعل طلب تعديل مفتوح لهذه النسخة. انتظر إغلاقه قبل إرسال طلب آخر.";
+    } else if (status && Number(status.free_credits) === 0 && Number(status.paid_edit_credits) === 0) {
+      notice = `استهلكت الطلبين المجانيين المتاحين لك. يتجدد رصيدك بعد ${formatTimeUntil(status.resets_at)}. يمكنك إرسال طلب جديد بعد التجديد أو استخدام رصيد مدفوع.`;
+    }
+    await sendMessage(token(), chatId, notice);
+    if (messageId) await showManagedInstance(user, chatId, String(draft.template_key), messageId);
     return;
   }
   draft = created[0];
@@ -171,6 +202,7 @@ export async function confirmEditRequest(user: TelegramUser, chatId: number): Pr
     adminIdsConfigured: adminIdsRaw.length > 0, adminCount: admins.length,
   });
   await sendMessage(token(), chatId, `تم إرسال طلب التعديل بنجاح.\nرمز نسختك: <code>${code}</code>\nرقم الطلب: <code>${requestId.slice(0,8).toUpperCase()}</code>\nسيتم إشعارك عند بدء التنفيذ أو اكتماله.`);
+  if (messageId) await showManagedInstance(user, chatId, String(draft.template_key), messageId);
   if (!admins.length) {
     console.error("factory_edit_admins_not_configured", { requestId, envPresent: adminIdsRaw.length > 0, parsedAdminCount: 0 });
   } else {
@@ -221,7 +253,7 @@ export async function handleAdminEditAction(admin: TelegramUser, chatId: number,
     return;
   }
   const row = rows[0];
-  const labels: Record<string,string> = { in_progress: "بدأنا تنفيذ التعديل على نسختك.", completed: "اكتمل التعديل على نسختك.", rejected: "تعذر قبول طلب التعديل. تم إعادة الرصيد إن كان لا يزال صالحًا؛ تواصل مع الإدارة لمعرفة التفاصيل." };
+  const labels: Record<string,string> = { in_progress: "بدأنا تنفيذ التعديل على نسختك.", completed: "اكتمل التعديل على نسختك.", rejected: "تعذر قبول طلب التعديل. أُعيد الرصيد المجاني إذا كان ضمن نافذة الـ24 ساعة الحالية، أو أُعيد الرصيد المدفوع بالكامل." };
   await sendMessage(token(), Number(row.owner_telegram_id), `${labels[action]}\nرمز النسخة: <code>${escapeHtml(String(row.public_code))}</code>`);
   await sendMessage(token(), chatId, action === "completed" ? "تم تسجيل اكتمال الطلب وإبلاغ صاحبه." : action === "rejected" ? "تم رفض الطلب وإبلاغ صاحبه." : "تم تحويل الطلب إلى قيد التنفيذ.");
 }
