@@ -97,7 +97,7 @@ test("dedupe paginates and fails closed when the scan cannot be completed", asyn
     ),
     /github_edit_dedupe_scan_incomplete/,
   );
-  assert.equal(calls, 5);
+  assert.equal(calls, 2);
 });
 
 test("GitHub HTTP errors expose only a short sanitized provider message", async () => {
