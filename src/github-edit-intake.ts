@@ -72,8 +72,8 @@ function safeProviderMessage(payload: any, token: string): string | null {
     if (typeof candidate !== "string") continue;
     const safe = candidate
       .replaceAll(token, "[redacted]")
-      .replace(/[\\u0000-\\u001f\\u007f]/g, " ")
-      .replace(/\\s+/g, " ")
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
       .trim()
       .slice(0, 180);
     if (safe) return safe;
